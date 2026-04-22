@@ -9,6 +9,10 @@ Evalchemy is developed by the [DataComp community](https://datacomp.ai) and [Bes
 
 ## 🎉 What's New 
 
+#### [Unreleased] Per-Sample Task Extraction API
+
+- Added a lightweight `TaskInstance` API for extracting benchmark prompts and generation kwargs, then evaluating raw model outputs offline on the same samples.
+
 #### [2025.02.24] New Reasoning Benchmarks
 
 - AIME25 and Alice in Wonderland have been added to [available benchmarks](https://github.com/mlfoundations/evalchemy?tab=readme-ov-file#built-in-benchmarks).

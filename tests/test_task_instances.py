@@ -1,0 +1,321 @@
+import contextlib
+import io
+import re
+import sys
+import types
+import unittest
+
+
+def install_lm_eval_stubs():
+    try:
+        import lm_eval  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    class Instance:
+        def __init__(self, request_type, doc, args, idx):
+            self.request_type = request_type
+            self.doc = doc
+            self.args = args
+            self.idx = idx
+
+    class LM:
+        pass
+
+    class OpenAIChatCompletion:
+        pass
+
+    class OpenAICompletionsAPI:
+        pass
+
+    class VLLM:
+        pass
+
+    lm_eval = types.ModuleType("lm_eval")
+    api = types.ModuleType("lm_eval.api")
+    instance_mod = types.ModuleType("lm_eval.api.instance")
+    model_mod = types.ModuleType("lm_eval.api.model")
+    models_mod = types.ModuleType("lm_eval.models")
+    openai_mod = types.SimpleNamespace(
+        OpenAIChatCompletion=OpenAIChatCompletion,
+        OpenAICompletionsAPI=OpenAICompletionsAPI,
+    )
+    vllm_mod = types.SimpleNamespace(VLLM=VLLM)
+
+    instance_mod.Instance = Instance
+    model_mod.LM = LM
+    models_mod.openai_completions = openai_mod
+    models_mod.vllm_causallms = vllm_mod
+
+    lm_eval.api = api
+    lm_eval.models = models_mod
+    api.instance = instance_mod
+    api.model = model_mod
+
+    sys.modules["lm_eval"] = lm_eval
+    sys.modules["lm_eval.api"] = api
+    sys.modules["lm_eval.api.instance"] = instance_mod
+    sys.modules["lm_eval.api.model"] = model_mod
+    sys.modules["lm_eval.models"] = models_mod
+
+
+def install_torch_stubs():
+    try:
+        import torch  # noqa: F401
+        import torch.distributed  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    torch = types.ModuleType("torch")
+    distributed = types.ModuleType("torch.distributed")
+
+    torch.manual_seed = lambda seed: None
+    distributed.all_gather_object = lambda all_results, results: None
+
+    sys.modules["torch"] = torch
+    sys.modules["torch.distributed"] = distributed
+
+
+def install_numpy_stubs():
+    try:
+        import numpy  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    numpy = types.ModuleType("numpy")
+    numpy.random = types.SimpleNamespace(seed=lambda seed: None)
+    sys.modules["numpy"] = numpy
+
+
+install_lm_eval_stubs()
+install_torch_stubs()
+install_numpy_stubs()
+
+from lm_eval.api.instance import Instance
+
+from eval.task import BaseBenchmark
+
+
+class SyntheticBenchmark(BaseBenchmark):
+    def __init__(self):
+        super().__init__()
+        self.examples = [
+            {"id": "sample-1", "answer": "yes"},
+            {"id": "sample-2", "answer": "no"},
+        ]
+
+    def generate_responses(self, model):
+        instances = []
+        for idx, example in enumerate(self.examples):
+            prompt = self._prepare_messages([{"role": "user", "content": f"Answer {example['id']}"}], model)
+            instances.append(
+                Instance(
+                    "generate_until",
+                    example,
+                    (
+                        prompt,
+                        {
+                            "max_new_tokens": 8,
+                            "temperature": 0.0,
+                            "seed": [0, 1, 2, 3],
+                        },
+                    ),
+                    idx,
+                )
+            )
+        outputs = self.compute(model, instances)
+        if model.rank != 0:
+            return None
+        for example, output in zip(self.examples, outputs):
+            example["model_output"] = output
+        return {"examples": self.examples}
+
+    def evaluate_responses(self, results):
+        examples = results["examples"]
+        solved = sum(example.get("model_output") == example["answer"] for example in examples)
+        return {"num_total": len(examples), "num_solved": solved, "accuracy": solved / len(examples)}
+
+
+class SyntheticGSM8KBenchmark(BaseBenchmark):
+    def __init__(self):
+        super().__init__()
+        self.examples = [
+            {"id": "gsm-1", "question": "What is 40 + 2?", "answer": "42"},
+            {"id": "gsm-2", "question": "What is 1,000 + 250?", "answer": "1250"},
+        ]
+
+    def generate_responses(self, model):
+        instances = []
+        for idx, example in enumerate(self.examples):
+            prompt = self._prepare_messages(
+                [
+                    {
+                        "role": "user",
+                        "content": f"{example['question']}\nGive the final answer as #### <answer>.",
+                    }
+                ],
+                model,
+            )
+            instances.append(
+                Instance(
+                    "generate_until",
+                    example,
+                    (prompt, {"max_new_tokens": 64, "temperature": 0.0}),
+                    idx,
+                )
+            )
+        outputs = self.compute(model, instances)
+        if model.rank != 0:
+            return None
+        for example, output in zip(self.examples, outputs):
+            example["model_output"] = output
+            example["model_answer"] = self.extract_answer(output)
+        return {"examples": self.examples}
+
+    def evaluate_responses(self, results):
+        examples = results["examples"]
+        solved = sum(example.get("model_answer") == example["answer"] for example in examples)
+        no_answer = sum(example.get("model_answer") == "" for example in examples)
+        return {
+            "num_total": len(examples),
+            "num_solved": solved,
+            "num_no_answer": no_answer,
+            "accuracy": solved / len(examples),
+        }
+
+    def extract_answer(self, output):
+        marker_matches = re.findall(r"####\s*([-+]?\$?[\d,]+(?:\.\d+)?)", output)
+        if marker_matches:
+            return self._normalize_number(marker_matches[-1])
+
+        number_matches = re.findall(r"[-+]?\$?[\d,]+(?:\.\d+)?", output)
+        if number_matches:
+            return self._normalize_number(number_matches[-1])
+        return ""
+
+    @staticmethod
+    def _normalize_number(value):
+        return value.replace("$", "").replace(",", "").strip()
+
+
+def has_code(response):
+    return re.findall(r"```(?:python)?\n(.*?)```", response, re.DOTALL)
+
+
+class SyntheticCodeBenchmark(BaseBenchmark):
+    def __init__(self):
+        super().__init__()
+        self.examples = [{"id": "code-1", "answer": "return 1"}]
+
+    def generate_responses(self, model):
+        example = self.examples[0]
+        prompt = self._prepare_messages([{"role": "user", "content": "Write code."}], model)
+        outputs = self.compute(
+            model,
+            [
+                Instance(
+                    "generate_until",
+                    example,
+                    (prompt, {"max_new_tokens": 32, "temperature": 0.0}),
+                    0,
+                )
+            ],
+        )
+        if model.rank != 0:
+            return None
+        return {"examples": [{**example, "model_outputs": outputs, "model_answers": [has_code(outputs[0])]}]}
+
+    def evaluate_responses(self, results):
+        example = results["examples"][0]
+        solved = example["model_answers"][0] == [example["answer"]]
+        return {"num_total": 1, "num_solved": int(solved), "accuracy": float(solved)}
+
+
+class TemplateModel:
+    model = "template-model"
+    model_args = {"model": "template-model"}
+
+    def apply_chat_template(self, messages):
+        return " ".join(f"{message['role']}: {message['content']}" for message in messages)
+
+
+class AnsweringLM:
+    rank = 0
+    world_size = 1
+
+    def apply_chat_template(self, messages):
+        return messages
+
+    def generate_until(self, requests):
+        return [request.doc["answer"] for request in requests]
+
+
+class TaskInstanceTests(unittest.TestCase):
+    def test_task_instances_capture_generation_requests(self):
+        benchmark = SyntheticBenchmark()
+
+        tasks = benchmark.task_instances()
+
+        self.assertEqual([task.id for task in tasks], ["sample-1", "sample-2"])
+        self.assertEqual(tasks[0].request_type, "generate_until")
+        self.assertEqual(tasks[0].prompt, [{"role": "user", "content": "Answer sample-1"}])
+        self.assertEqual(tasks[0].generation_kwargs, {"max_new_tokens": 8, "temperature": 0.0})
+        self.assertEqual(tasks[0].metadata["task_name"], "Synthetic")
+
+    def test_task_instances_can_use_target_model_chat_template(self):
+        benchmark = SyntheticBenchmark()
+
+        task = benchmark.task_instances(model=TemplateModel())[0]
+
+        self.assertEqual(task.prompt, "user: Answer sample-1")
+
+    def test_task_instance_evaluates_raw_output_with_existing_evaluator(self):
+        benchmark = SyntheticBenchmark()
+        task = benchmark.task_instances()[0]
+
+        result = task.evaluate("yes")
+
+        self.assertIs(result["supported"], True)
+        self.assertEqual(result["result"]["num_total"], 1)
+        self.assertEqual(result["result"]["num_solved"], 1)
+        self.assertEqual(result["result"]["accuracy"], 1.0)
+
+    def test_synthetic_gsm8k_extraction_and_raw_output_evaluation(self):
+        benchmark = SyntheticGSM8KBenchmark()
+        first, second = benchmark.task_instances()
+
+        self.assertEqual(first.prompt[0]["content"], "What is 40 + 2?\nGive the final answer as #### <answer>.")
+        self.assertEqual(first.evaluate("Reasoning here. #### 42")["result"]["accuracy"], 1.0)
+        self.assertEqual(first.evaluate("The final answer is 42.")["result"]["accuracy"], 1.0)
+        self.assertEqual(second.evaluate("Compute it carefully: #### 1,250")["result"]["accuracy"], 1.0)
+        self.assertEqual(first.evaluate("#### 41")["result"]["accuracy"], 0.0)
+        self.assertEqual(first.evaluate("I cannot tell.")["result"]["num_no_answer"], 1)
+
+    def test_task_instance_uses_module_level_has_code_when_available(self):
+        benchmark = SyntheticCodeBenchmark()
+        task = benchmark.task_instances()[0]
+
+        result = task.evaluate("```python\nreturn 1```")
+
+        self.assertIs(result["supported"], True)
+        self.assertEqual(result["result"]["accuracy"], 1.0)
+
+    def test_existing_run_benchmark_interface_still_works(self):
+        benchmark = SyntheticBenchmark()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = benchmark.run_benchmark(AnsweringLM())
+
+        self.assertEqual(result["num_total"], 2)
+        self.assertEqual(result["num_solved"], 2)
+        self.assertEqual(result["accuracy"], 1.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
