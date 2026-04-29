@@ -410,6 +410,41 @@ class TaskInstanceTests(unittest.TestCase):
             cache_dir=lcb_module.HF_HUB_CACHE,
         )
 
+    def test_livecodebench_single_example_includes_public_test_results(self):
+        from eval.chat_benchmarks.LiveCodeBench import eval_instruct as lcb_module
+
+        benchmark = lcb_module.LiveCodeBenchBenchmark(version="v6")
+        example = {
+            "difficulty": "easy",
+            "model_answer": ["print(2)"],
+            "public_test_cases": '[{"input": "1\\n", "output": "2", "testtype": "stdin"}]',
+            "is_stdin": True,
+        }
+
+        with mock.patch.object(benchmark, "check_correctness", return_value=False):
+            with mock.patch.object(
+                lcb_module,
+                "lcb_run_test_cases",
+                return_value=[(True, "public test passed", "2", 0.01)],
+            ):
+                result = benchmark.evaluate_single_example(example)
+
+        self.assertFalse(result["correctness"])
+        self.assertEqual(result["reason"], "Code is incorrect.")
+        self.assertEqual(
+            result["public_test_results"],
+            [
+                {
+                    "test_index": 0,
+                    "test_case": {"input": "1\n", "output": "2", "testtype": "stdin"},
+                    "passed": True,
+                    "details": "public test passed",
+                    "output": "2",
+                    "time_elapsed": 0.01,
+                }
+            ],
+        )
+
     def test_task_manager_forwards_livecodebench_version(self):
         from eval.task import TaskManager
 

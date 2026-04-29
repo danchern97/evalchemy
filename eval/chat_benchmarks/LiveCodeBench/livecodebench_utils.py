@@ -265,6 +265,10 @@ def run_tests_for_one_example(test_cases, completion, result_list, is_extracted)
 
 def lcb_run(problem, completion, timeout, is_extracted):
     test_cases = problem["test"]
+    return lcb_run_test_cases(test_cases, completion, timeout, is_extracted)
+
+
+def lcb_run_test_cases(test_cases, completion, timeout, is_extracted):
     manager = multiprocessing.Manager()
     result = manager.list()
     p = multiprocessing.Process(target=run_tests_for_one_example, args=(test_cases, completion, result, is_extracted))

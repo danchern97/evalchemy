@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import os
 import re
@@ -13,7 +14,13 @@ from lm_eval.api.model import LM
 
 from eval.task import BaseBenchmark
 
-from .livecodebench_utils import lcb_run, map_to_example, post_process_code, translate_private_test_cases
+from .livecodebench_utils import (
+    lcb_run,
+    lcb_run_test_cases,
+    map_to_example,
+    post_process_code,
+    translate_private_test_cases,
+)
 
 HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE")
 OFFICIAL_DATASET_REPO = "livecodebench/code_generation_lite"
@@ -195,6 +202,34 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
 
         return result == "passed"
 
+    @staticmethod
+    def _parse_public_test_cases(public_test_cases: Any) -> List[Dict[str, Any]]:
+        if public_test_cases is None:
+            return []
+        if isinstance(public_test_cases, str):
+            return json.loads(public_test_cases)
+        return list(public_test_cases)
+
+    def evaluate_public_test_cases(
+        self, example: Dict[str, Any], completion: str, timeout: float, is_extracted: bool
+    ) -> List[Dict[str, Any]]:
+        public_test_cases = self._parse_public_test_cases(example.get("public_test_cases"))
+        if not public_test_cases:
+            return []
+
+        results = lcb_run_test_cases(public_test_cases, completion, timeout, is_extracted)
+        return [
+            {
+                "test_index": idx,
+                "test_case": test_case,
+                "passed": passed,
+                "details": details,
+                "output": output,
+                "time_elapsed": time_elapsed,
+            }
+            for idx, (test_case, (passed, details, output, time_elapsed)) in enumerate(zip(public_test_cases, results))
+        ]
+
     def evaluate_single_example(self, example):
         """Helper function to evaluate a single example"""
         try:
@@ -203,6 +238,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
                 "difficulty": example["difficulty"],
                 "correctness": None,
                 "reason": None,
+                "public_test_results": [],
             }
 
             code_filter_result = example["model_answer"]
@@ -222,6 +258,12 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
                 # Add timeout handling
                 curr_res = self.check_correctness(
                     problem=problem_to_check,
+                    completion=post_process_code(last_code),
+                    timeout=6,
+                    is_extracted=not problem_to_check["is_stdin"],
+                )
+                response_entry["public_test_results"] = self.evaluate_public_test_cases(
+                    example=problem_to_check,
                     completion=post_process_code(last_code),
                     timeout=6,
                     is_extracted=not problem_to_check["is_stdin"],
@@ -247,6 +289,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
                 "difficulty": example.get("difficulty"),
                 "correctness": False,
                 "reason": f"Critical error: {str(outer_e)}",
+                "public_test_results": [],
             }
 
     def evaluate_responses(self, responses: Dict[str, Any]) -> Dict[str, float]:
