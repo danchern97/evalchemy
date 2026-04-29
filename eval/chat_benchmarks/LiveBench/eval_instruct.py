@@ -77,7 +77,7 @@ class LiveBenchBenchmark(BaseBenchmark):
         self.num_choices = num_choices
         self.all_release_dates = ["2024-07-26", "2024-06-24", "2024-08-31", "2024-11-25"]
         self.seed = seed
-        self.data_path = f"eval/chat_benchmarks/LiveBench/data"
+        self.data_path = self.resolve_asset_path("eval/chat_benchmarks/LiveBench/data")
 
     def get_question_list(self, model_name: str, release_set: set):
         questions_all = []

@@ -1,7 +1,9 @@
 import contextlib
 import io
+import os
 import re
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -39,6 +41,9 @@ def install_lm_eval_stubs():
     instance_mod = types.ModuleType("lm_eval.api.instance")
     model_mod = types.ModuleType("lm_eval.api.model")
     models_mod = types.ModuleType("lm_eval.models")
+    tasks_mod = types.ModuleType("lm_eval.tasks")
+    hendrycks_math_mod = types.ModuleType("lm_eval.tasks.hendrycks_math")
+    hendrycks_math_utils_mod = types.ModuleType("lm_eval.tasks.hendrycks_math.utils")
     openai_mod = types.SimpleNamespace(
         OpenAIChatCompletion=OpenAIChatCompletion,
         OpenAICompletionsAPI=OpenAICompletionsAPI,
@@ -49,17 +54,26 @@ def install_lm_eval_stubs():
     model_mod.LM = LM
     models_mod.openai_completions = openai_mod
     models_mod.vllm_causallms = vllm_mod
+    hendrycks_math_utils_mod.is_equiv = lambda left, right: str(left) == str(right)
+    hendrycks_math_utils_mod.last_boxed_only_string = lambda text: text
+    hendrycks_math_utils_mod.remove_boxed = lambda text: text.replace("\\boxed{", "").replace("}", "")
 
     lm_eval.api = api
     lm_eval.models = models_mod
+    lm_eval.tasks = tasks_mod
     api.instance = instance_mod
     api.model = model_mod
+    tasks_mod.hendrycks_math = hendrycks_math_mod
+    hendrycks_math_mod.utils = hendrycks_math_utils_mod
 
     sys.modules["lm_eval"] = lm_eval
     sys.modules["lm_eval.api"] = api
     sys.modules["lm_eval.api.instance"] = instance_mod
     sys.modules["lm_eval.api.model"] = model_mod
     sys.modules["lm_eval.models"] = models_mod
+    sys.modules["lm_eval.tasks"] = tasks_mod
+    sys.modules["lm_eval.tasks.hendrycks_math"] = hendrycks_math_mod
+    sys.modules["lm_eval.tasks.hendrycks_math.utils"] = hendrycks_math_utils_mod
 
 
 def install_torch_stubs():
@@ -100,7 +114,7 @@ install_numpy_stubs()
 
 from lm_eval.api.instance import Instance
 
-from eval.task import BaseBenchmark
+from eval.task import BaseBenchmark, resolve_package_asset_path
 
 
 class SyntheticBenchmark(BaseBenchmark):
@@ -326,6 +340,29 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertEqual(result["num_total"], 2)
         self.assertEqual(result["num_solved"], 2)
         self.assertEqual(result["accuracy"], 1.0)
+
+    def test_resolve_package_asset_path_maps_repo_style_path_to_installed_location(self):
+        resolved = resolve_package_asset_path("eval/chat_benchmarks/AIME24/data/aime24.json")
+
+        self.assertTrue(os.path.isabs(resolved))
+        self.assertTrue(resolved.endswith("eval/chat_benchmarks/AIME24/data/aime24.json"))
+        self.assertTrue(os.path.exists(resolved))
+
+    def test_aime24_default_data_file_loads_outside_repo_cwd(self):
+        from eval.chat_benchmarks.AIME24.eval_instruct import AIME24Benchmark
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                benchmark = AIME24Benchmark(debug=True)
+                questions = benchmark.load_questions()
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(len(questions), 2)
+        self.assertTrue(os.path.isabs(benchmark.data_file))
+        self.assertTrue(benchmark.data_file.endswith("eval/chat_benchmarks/AIME24/data/aime24.json"))
 
     def test_livecodebench_version_normalization_and_repeat_defaults(self):
         from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark

@@ -42,7 +42,7 @@ class MBPPPlusBenchmark(BaseBenchmark):
             system_instruction: Optional system instruction for the model
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
-        self.data_dir = data_dir
+        self.data_dir = self.resolve_asset_path(data_dir)
         self.max_tokens = max_tokens
         self.num_workers = num_workers
         self.timeout = timeout

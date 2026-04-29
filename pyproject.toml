@@ -181,6 +181,19 @@ vllm = [
     "lm-eval[vllm]==0.4.11",
 ]
 
+[tool.hatch.build]
+include = [
+    "eval/**/*.json",
+    "eval/**/*.jsonl",
+    "eval/**/*.jsonl.gz",
+    "eval/**/*.md",
+    "eval/**/*.txt",
+    "eval/**/*.tsv",
+    "eval/**/*.yaml",
+    "eval/**/*.yml",
+    "eval/**/*.csv",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["eval", "database"]
 

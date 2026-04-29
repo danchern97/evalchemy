@@ -17,6 +17,30 @@ import torch.distributed as dist
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 
+EVAL_PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_package_asset_path(
+    path: Optional[Union[str, os.PathLike]], module_file: Optional[str] = None
+) -> Optional[str]:
+    """Resolve bundled benchmark assets so they work from an installed package as well as a source checkout."""
+
+    if path is None:
+        return None
+
+    path_str = os.path.expanduser(os.fspath(path))
+    if os.path.isabs(path_str):
+        return path_str
+
+    if os.path.exists(path_str):
+        return os.path.abspath(path_str)
+
+    if path_str.startswith("eval/") or path_str.startswith("database/"):
+        return os.path.join(os.path.dirname(EVAL_PACKAGE_ROOT), path_str)
+
+    anchor_dir = EVAL_PACKAGE_ROOT if module_file is None else os.path.dirname(os.path.abspath(module_file))
+    return os.path.join(anchor_dir, path_str)
+
 
 @dataclass
 class TaskInstance:
@@ -64,6 +88,9 @@ class BaseBenchmark(ABC):
     def __init__(self, logger: Optional[logging.Logger] = None, system_instruction: Optional[str] = None):
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self.system_instruction = system_instruction
+
+    def resolve_asset_path(self, path: Optional[Union[str, os.PathLike]]) -> Optional[str]:
+        return resolve_package_asset_path(path, module_file=inspect.getfile(self.__class__))
 
     def _normalize_model_args(self, model: LM, instances: List[Instance]) -> List[Instance]:
         openai_completions = getattr(lm_eval_models, "openai_completions", None)

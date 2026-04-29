@@ -153,6 +153,7 @@ class CruxEvalBenchmark(BaseBenchmark):
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
         self.language = "python"
+        data_dir = self.resolve_asset_path(data_dir)
         os.makedirs(data_dir, exist_ok=True)
         self.data_dir = data_dir
         self.max_tokens = max_tokens

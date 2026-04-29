@@ -95,6 +95,7 @@ class WildBenchBenchmark(BaseBenchmark):
             self.logger.warning(f"Overwriting config.judge_model = {annotator_model} ")
             config.model = annotator_model
         self.config = config or WildBenchConfig(model=annotator_model)
+        self.config.eval_template = self.resolve_asset_path(self.config.eval_template)
         self.debug = debug
         self.max_new_tokens = max_tokens
 

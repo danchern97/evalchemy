@@ -42,7 +42,7 @@ class MATH500Benchmark(BaseBenchmark):
             system_instruction: Optional system instruction for the model
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
-        self.data_file = data_file
+        self.data_file = self.resolve_asset_path(data_file)
         self.debug = debug
         self.seed = seed
         self.max_new_tokens = max_tokens

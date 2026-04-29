@@ -83,7 +83,7 @@ class MixEvalBenchmark(BaseBenchmark):
                 "version": version,
                 "batch_size": batch_size,
                 "max_gpu_memory": max_gpu_memory,
-                "data_path": data_path,
+                "data_path": self.resolve_asset_path(data_path),
                 "api_parallel_num": api_parallel_num,
                 "multichoice_judge": self.multichoice_judge,
                 "freeform_judge": self.freeform_judge,

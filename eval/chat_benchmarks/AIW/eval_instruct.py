@@ -39,7 +39,7 @@ class AIWBenchmark(BaseBenchmark):
             system_instruction: Optional system instruction for the model
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
-        self.data_file = data_file
+        self.data_file = self.resolve_asset_path(data_file)
         self.debug = debug
         self.max_new_tokens = max_tokens
         self.seed = seed
@@ -112,11 +112,11 @@ class AIWBenchmark(BaseBenchmark):
         """Load AIW questions from the data file."""
         with open(self.data_file, "r") as f:
             questions = json.load(f)
-            
+
         if self.debug:
             questions = questions[:2]
             self.logger.info(f"Debug mode enabled. Using only {len(questions)} questions.")
- 
+
         self.logger.info(f"Loaded {len(questions)} questions from {self.data_file}")
         return questions
 

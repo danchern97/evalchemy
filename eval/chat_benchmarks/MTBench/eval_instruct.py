@@ -86,13 +86,14 @@ class MTBenchBenchmark(BaseBenchmark):
             system_instruction: Optional system instruction for the model
         """
         super().__init__(logger=logger, system_instruction=system_instruction)
-        self.base_path = Path(base_path)
+        self.base_path = Path(self.resolve_asset_path(base_path))
         if annotator_model == "auto":
             annotator_model = "gpt-4"
         if config:
             print(f"Warning: Overwriting config.judge_model = {annotator_model} ")
             config.judge_model = annotator_model
         self.config = config or MTBenchConfig(judge_model=annotator_model)
+        self.config.judge_file = self.resolve_asset_path(self.config.judge_file)
         self.config.max_new_token = max_tokens
         self.debug = debug
 
