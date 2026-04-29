@@ -204,6 +204,17 @@ result = task.evaluate(raw_output)
 
 For benchmarks with standard in-memory evaluators, `task.evaluate(raw_output)` reuses the benchmark's existing evaluation path for that single sample. Benchmarks with custom file-based or batch-only evaluators may need to override `evaluate_task_instance(...)`.
 
+### LiveCodeBench Versions
+
+`LiveCodeBench` accepts a `version` benchmark kwarg through `TaskManager`. Use cumulative release tags like `"v6"` or `"release_v6"` for all problems up to that release, or delta tags like `"v5_v6"` for only the new problems added between releases:
+
+```python
+from eval.task import TaskManager
+
+task_manager = TaskManager(task_list=["LiveCodeBench"], version="v5_v6", debug=True)
+benchmark = task_manager.get_benchmark("LiveCodeBench")
+```
+
 ## 🔧 Advanced Usage
 
 ### Support for different models
