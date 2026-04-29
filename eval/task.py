@@ -339,10 +339,17 @@ class TaskManager:
             try:
                 # Import the module
                 sys.path.insert(0, item_path)
-                spec = importlib.util.spec_from_file_location(f"eval.{benchmarks_dir}.{item}.eval_instruct", eval_path)
+                module_name = f"eval.{benchmarks_dir}.{item}.eval_instruct"
+                spec = importlib.util.spec_from_file_location(module_name, eval_path)
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                sys.path.pop(0)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(module_name, None)
+                    raise
+                finally:
+                    sys.path.pop(0)
 
                 # Find benchmark class
                 benchmark_classes = [
