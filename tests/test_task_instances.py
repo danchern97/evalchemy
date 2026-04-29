@@ -364,23 +364,17 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(benchmark.data_file))
         self.assertTrue(benchmark.data_file.endswith("eval/chat_benchmarks/AIME24/data/aime24.json"))
 
-    def test_livecodebench_version_normalization_and_repeat_defaults(self):
+    def test_livecodebench_version_passthrough_and_repeat_defaults(self):
         from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark
 
-        self.assertEqual(LiveCodeBenchBenchmark(version="v2").version_tag, "release_v2")
+        self.assertEqual(LiveCodeBenchBenchmark(version="v2").version_tag, "v2")
         self.assertEqual(LiveCodeBenchBenchmark(version="release_v5").version_tag, "release_v5")
-        self.assertEqual(LiveCodeBenchBenchmark(version=6).version_tag, "release_v6")
+        self.assertEqual(LiveCodeBenchBenchmark(version=6).version_tag, "v6")
         self.assertEqual(LiveCodeBenchBenchmark(version="v5_v6").version_tag, "v5_v6")
-        self.assertEqual(LiveCodeBenchBenchmark(version="release_v5_v6").version_tag, "v5_v6")
+        self.assertEqual(LiveCodeBenchBenchmark(version="release_v5_v6").version_tag, "release_v5_v6")
         self.assertEqual(LiveCodeBenchBenchmark(version="v2").n_repeat, 6)
         self.assertEqual(LiveCodeBenchBenchmark(version="v6").n_repeat, 3)
         self.assertEqual(LiveCodeBenchBenchmark(version="v5_v6").n_repeat, 3)
-        self.assertEqual(LiveCodeBenchBenchmark(version="v5_v6").version_bounds, (5, 6))
-
-        with self.assertRaises(ValueError):
-            LiveCodeBenchBenchmark(version="v4")
-        with self.assertRaises(ValueError):
-            LiveCodeBenchBenchmark(version="v6_v5")
 
     def test_livecodebench_load_questions_uses_version_tag(self):
         from eval.chat_benchmarks.LiveCodeBench import eval_instruct as lcb_module
@@ -393,7 +387,7 @@ class TaskInstanceTests(unittest.TestCase):
 
         load_dataset_mock.assert_called_once_with(
             "livecodebench/code_generation_lite",
-            version_tag="release_v6",
+            version_tag="v6",
             split="test",
             trust_remote_code=True,
             cache_dir=lcb_module.HF_HUB_CACHE,
@@ -424,7 +418,6 @@ class TaskInstanceTests(unittest.TestCase):
 
         self.assertIsNotNone(benchmark)
         self.assertEqual(benchmark.version_tag, "v5_v6")
-        self.assertEqual(benchmark.version_bounds, (5, 6))
         self.assertEqual(benchmark.n_repeat, 3)
 
     def test_livecodebench_legacy_wrappers_are_thin_configs(self):
@@ -434,11 +427,11 @@ class TaskInstanceTests(unittest.TestCase):
         legacy_v5 = LiveCodeBenchV5Benchmark()
         official_v5 = LiveCodeBenchV5OfficialBenchmark()
 
-        self.assertEqual(legacy_v5.version_tag, "release_v5")
+        self.assertEqual(legacy_v5.version_tag, "v5")
         self.assertEqual(legacy_v5.dataset_repo, "mlfoundations-dev/LCBv5-v2")
         self.assertIsNone(legacy_v5.contest_months)
 
-        self.assertEqual(official_v5.version_tag, "release_v5")
+        self.assertEqual(official_v5.version_tag, "v5")
         self.assertEqual(official_v5.dataset_repo, "livecodebench/code_generation_lite")
         self.assertEqual(
             official_v5.contest_months,

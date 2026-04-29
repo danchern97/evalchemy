@@ -206,7 +206,7 @@ For benchmarks with standard in-memory evaluators, `task.evaluate(raw_output)` r
 
 ### LiveCodeBench Versions
 
-`LiveCodeBench` accepts a `version` benchmark kwarg through `TaskManager`. Use cumulative release tags like `"v6"` or `"release_v6"` for all problems up to that release, or delta tags like `"v5_v6"` for only the new problems added between releases:
+`LiveCodeBench` accepts a `version` benchmark kwarg through `TaskManager`, and passes it directly to the Hugging Face dataset loader. Use tags like `"v6"`, `"release_v6"`, or `"v5_v6"` depending on the slice you want:
 
 ```python
 from eval.task import TaskManager

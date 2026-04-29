@@ -4,7 +4,7 @@ import os
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 from datasets import Dataset, concatenate_datasets, load_dataset
@@ -85,49 +85,18 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         self.dataset_split = dataset_split
         self.cache_dir = cache_dir
         self.contest_months = set(contest_months) if contest_months else None
-        self.version_tag, self.version_bounds = self._normalize_version_tag(version)
-        self.n_repeat = n_repeat if n_repeat is not None else self._default_repeat_count(self.version_bounds[1])
+        self.version_tag = self._coerce_version_tag(version)
+        self.n_repeat = n_repeat if n_repeat is not None else self._default_repeat_count(self.version_tag)
 
     @staticmethod
-    def _normalize_version_tag(version: Union[str, int]) -> Tuple[str, Tuple[int, int]]:
+    def _coerce_version_tag(version: Union[str, int]) -> str:
         if isinstance(version, int):
-            version = f"v{version}"
-
-        normalized = str(version).strip().lower().replace("-", "_")
-        if normalized.startswith("release_"):
-            normalized = normalized[len("release_") :]
-
-        if normalized.isdigit():
-            normalized = f"v{normalized}"
-
-        single_match = re.fullmatch(r"v(\d+)", normalized)
-        if single_match:
-            version_number = int(single_match.group(1))
-            if version_number not in {2, 5, 6}:
-                supported = "v2, v5, v6, v2_v5, v2_v6, v5_v6"
-                raise ValueError(f"Unsupported LiveCodeBench version '{version}'. Expected one of: {supported}")
-            return f"release_{normalized}", (version_number, version_number)
-
-        range_match = re.fullmatch(r"v(\d+)_v(\d+)", normalized)
-        if range_match:
-            start_version = int(range_match.group(1))
-            end_version = int(range_match.group(2))
-            if start_version >= end_version:
-                raise ValueError(
-                    f"Unsupported LiveCodeBench version '{version}'. Range versions must increase, e.g. 'v5_v6'."
-                )
-            supported_versions = {2, 5, 6}
-            if start_version not in supported_versions or end_version not in supported_versions:
-                supported = "v2, v5, v6, v2_v5, v2_v6, v5_v6"
-                raise ValueError(f"Unsupported LiveCodeBench version '{version}'. Expected one of: {supported}")
-            return normalized, (start_version, end_version)
-
-        supported = "v2, v5, v6, v2_v5, v2_v6, v5_v6"
-        raise ValueError(f"Unsupported LiveCodeBench version '{version}'. Expected one of: {supported}")
+            return f"v{version}"
+        return str(version).strip()
 
     @staticmethod
-    def _default_repeat_count(end_version: int) -> int:
-        return 6 if end_version == 2 else 3
+    def _default_repeat_count(version_tag: str) -> int:
+        return 6 if version_tag in {"2", "v2", "release_v2"} else 3
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
