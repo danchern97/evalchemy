@@ -182,6 +182,28 @@ python -m eval.eval \
 
 We add several more command examples in [`eval/examples`](https://github.com/mlfoundations/Evalchemy/tree/main/eval/examples) to help you start using Evalchemy. 
 
+### Offline Per-Sample Evaluation
+
+You can extract benchmark samples as generation-ready tasks, run your own model outside Evalchemy, and score the raw outputs against the same sample:
+
+```python
+from eval.task import TaskManager
+
+task_manager = TaskManager(task_list=["AIME24"], debug=True)
+benchmark = task_manager.get_benchmark("AIME24")
+assert benchmark is not None
+benchmark.n_repeat = 1
+task = benchmark.task_instances()[0]
+
+prompt = task.prompt
+generation_kwargs = task.generation_kwargs
+
+raw_output = r"\boxed{42}"
+result = task.evaluate(raw_output)
+```
+
+For benchmarks with standard in-memory evaluators, `task.evaluate(raw_output)` reuses the benchmark's existing evaluation path for that single sample. Benchmarks with custom file-based or batch-only evaluators may need to override `evaluate_task_instance(...)`.
+
 ## 🔧 Advanced Usage
 
 ### Support for different models
