@@ -4,6 +4,7 @@ import re
 import sys
 import types
 import unittest
+from unittest import mock
 
 
 def install_lm_eval_stubs():
@@ -256,6 +257,16 @@ class AnsweringLM:
         return [request.doc["answer"] for request in requests]
 
 
+class FakeDataset:
+    column_names = ["question_id"]
+
+    def shard(self, num_shards, index):
+        return self
+
+    def map(self, fn, num_proc=None, remove_columns=None):
+        return self
+
+
 class TaskInstanceTests(unittest.TestCase):
     def test_task_instances_capture_generation_requests(self):
         benchmark = SyntheticBenchmark()
@@ -315,6 +326,45 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertEqual(result["num_total"], 2)
         self.assertEqual(result["num_solved"], 2)
         self.assertEqual(result["accuracy"], 1.0)
+
+    def test_livecodebench_version_normalization_and_repeat_defaults(self):
+        from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark
+
+        self.assertEqual(LiveCodeBenchBenchmark(version="v2").version_tag, "release_v2")
+        self.assertEqual(LiveCodeBenchBenchmark(version="release_v5").version_tag, "release_v5")
+        self.assertEqual(LiveCodeBenchBenchmark(version=6).version_tag, "release_v6")
+        self.assertEqual(LiveCodeBenchBenchmark(version="v2").n_repeat, 6)
+        self.assertEqual(LiveCodeBenchBenchmark(version="v6").n_repeat, 3)
+
+        with self.assertRaises(ValueError):
+            LiveCodeBenchBenchmark(version="v4")
+
+    def test_livecodebench_load_questions_uses_version_tag(self):
+        from eval.chat_benchmarks.LiveCodeBench import eval_instruct as lcb_module
+
+        benchmark = lcb_module.LiveCodeBenchBenchmark(version="v6")
+
+        with mock.patch.object(lcb_module, "load_dataset", return_value=FakeDataset()) as load_dataset_mock:
+            with mock.patch.object(lcb_module, "concatenate_datasets", side_effect=lambda shards: shards[0]):
+                benchmark.load_questions()
+
+        load_dataset_mock.assert_called_once_with(
+            "livecodebench/code_generation_lite",
+            version_tag="release_v6",
+            split="test",
+            trust_remote_code=True,
+            cache_dir=lcb_module.HF_HUB_CACHE,
+        )
+
+    def test_task_manager_forwards_livecodebench_version(self):
+        from eval.task import TaskManager
+
+        task_manager = TaskManager(task_list=["LiveCodeBench"], version="v6", debug=True)
+        benchmark = task_manager.get_benchmark("LiveCodeBench")
+
+        self.assertIsNotNone(benchmark)
+        self.assertEqual(benchmark.version_tag, "release_v6")
+        self.assertEqual(benchmark.n_repeat, 3)
 
 
 if __name__ == "__main__":

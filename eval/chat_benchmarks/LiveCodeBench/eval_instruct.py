@@ -4,7 +4,7 @@ import os
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 from datasets import Dataset, concatenate_datasets, load_dataset
@@ -52,6 +52,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         debug: bool = False,
         seed: List[int] = [0, 1234, 1234, 1234],
         max_tokens: int = 32768,
+        version: Union[str, int] = "v2",
         logger: Optional[logging.Logger] = None,
         system_instruction: Optional[str] = None,
     ):
@@ -61,6 +62,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         Args:
             debug: If set, only evaluate on 2 examples
             seed: Random seed for reproducibility. Default is [0, 1234, 1234, 1234] for lm-eval-harness.
+            version: LiveCodeBench release version, e.g. 2, "v2", "release_v2", 5, or 6.
             logger: Optional logger instance
             system_instruction: Optional system instruction for the model
         """
@@ -68,7 +70,27 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         self.debug = debug
         self.max_new_tokens = max_tokens
         self.seed = seed
-        self.n_repeat = 6
+        self.version_tag = self._normalize_version_tag(version)
+        self.n_repeat = 6 if self.version_tag == "release_v2" else 3
+
+    @staticmethod
+    def _normalize_version_tag(version: Union[str, int]) -> str:
+        if isinstance(version, int):
+            version = f"v{version}"
+
+        normalized = str(version).strip().lower().replace("-", "_")
+        if normalized.startswith("release_"):
+            normalized = normalized[len("release_") :]
+
+        if normalized.isdigit():
+            normalized = f"v{normalized}"
+
+        version_tag = f"release_{normalized}"
+        supported_versions = {"release_v2", "release_v5", "release_v6"}
+        if version_tag not in supported_versions:
+            supported = ", ".join(sorted(supported_versions))
+            raise ValueError(f"Unsupported LiveCodeBench version '{version}'. Expected one of: {supported}")
+        return version_tag
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
@@ -98,7 +120,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
                 if not isinstance(example, dict):
                     self.logger.error(f"Example at index {idx} is not a dict. Type: {type(example)}, Value: {example}")
                     continue
-                    
+
                 if example["is_stdin"]:
                     prompt_text = (
                         "Generate an executable Python function generated from the given prompt. The function should take stdin as input and print the output. Simply call the function after the definition."
@@ -355,11 +377,13 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
 
     def load_questions(self) -> Dataset:
         """Load LiveCodeBench questions from source."""
-        self.logger.info("Loading LiveCodeBench questions from source and converting to dataset...")
+        self.logger.info(
+            f"Loading LiveCodeBench questions from source and converting to dataset for {self.version_tag}..."
+        )
         cpu_count = os.cpu_count()
         ds = load_dataset(
             "livecodebench/code_generation_lite",
-            version_tag="release_v2",
+            version_tag=self.version_tag,
             split="test",
             trust_remote_code=True,
             cache_dir=HF_HUB_CACHE,
