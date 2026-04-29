@@ -29,10 +29,8 @@ dependencies = [
     "accelerate",
     "peft",
     "trl",
-    "bitsandbytes",
     "sentencepiece",
     "sentence-transformers>=2.2.2",
-    "optimum==1.12.0",
     
     # Machine Learning and Scientific Computing
     "numpy",
@@ -74,7 +72,6 @@ dependencies = [
     "reka-api",
     "together",
     "dashscope",
-    "fschat @ file:eval/chat_benchmarks/MTBench",  # Use relative path that pip will resolve during installation
     
     # Cloud & Storage
     "gcsfs",
@@ -82,7 +79,6 @@ dependencies = [
     "google-auth==2.25.1",
     "boto3",
     "botocore",
-    "sagemaker",
     "fsspec==2024.6.1",
     "hf-transfer",
     "huggingface_hub[cli]",
@@ -103,7 +99,6 @@ dependencies = [
     "httpx",
     "httpx-sse",
     "requests>=2.28",
-    "websocket",
     "aiofiles",
     "bespokelabs-curator>=0.1.16.0",
     
@@ -119,7 +114,6 @@ dependencies = [
     "python-box",
     "fire",
     "tiktoken",
-    "ray[default]",
     "backoff>=2.2",
     "docker-pycreds",
     "sentry-sdk",
@@ -154,7 +148,7 @@ dependencies = [
     "swebench>=3.0.4",
 
     # LM Eval
-    "lm-eval[vllm] @ git+https://github.com/EtashGuha/lm-evaluation-harness@etashg/tokenize_fix",
+    "lm-eval==0.4.11",
 ]
 
 [project.urls]
@@ -170,9 +164,25 @@ dev = [
     "pre-commit",
     "isort",
 ]
+mtbench = [
+    "fschat",
+]
+aws = [
+    "sagemaker",
+]
+acceleration = [
+    "bitsandbytes",
+    "optimum==1.12.0",
+]
+distributed = [
+    "ray[default]",
+]
+vllm = [
+    "lm-eval[vllm]==0.4.11",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["evalchemy", "database"]
+packages = ["eval", "database"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -187,9 +197,3 @@ line-length = 120
 [tool.isort]
 profile = "black"
 multi_line_output = 3
-
-[tool.setuptools]
-packages = ["evalchemy"]
-
-[tool.setuptools.package-dir]
-evalchemy = "evalchemy"
