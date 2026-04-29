@@ -366,6 +366,24 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertEqual(benchmark.version_tag, "release_v6")
         self.assertEqual(benchmark.n_repeat, 3)
 
+    def test_livecodebench_legacy_wrappers_are_thin_configs(self):
+        from eval.chat_benchmarks.LiveCodeBenchv5.eval_instruct import LiveCodeBenchV5Benchmark
+        from eval.chat_benchmarks.LiveCodeBenchv5_official.eval_instruct import LiveCodeBenchV5OfficialBenchmark
+
+        legacy_v5 = LiveCodeBenchV5Benchmark()
+        official_v5 = LiveCodeBenchV5OfficialBenchmark()
+
+        self.assertEqual(legacy_v5.version_tag, "release_v5")
+        self.assertEqual(legacy_v5.dataset_repo, "mlfoundations-dev/LCBv5-v2")
+        self.assertIsNone(legacy_v5.contest_months)
+
+        self.assertEqual(official_v5.version_tag, "release_v5")
+        self.assertEqual(official_v5.dataset_repo, "livecodebench/code_generation_lite")
+        self.assertEqual(
+            official_v5.contest_months,
+            {"2024-08", "2024-09", "2024-10", "2024-11", "2024-12", "2025-01"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

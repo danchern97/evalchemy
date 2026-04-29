@@ -16,6 +16,7 @@ from eval.task import BaseBenchmark
 from .livecodebench_utils import lcb_run, map_to_example, post_process_code, translate_private_test_cases
 
 HF_HUB_CACHE = os.environ.get("HF_HUB_CACHE")
+OFFICIAL_DATASET_REPO = "livecodebench/code_generation_lite"
 if not HF_HUB_CACHE:
     print(
         "WARNING: HF_HUB_CACHE environment variable is not set, using default cache directory ~/.cache/huggingface/hub for LiveCodeBench benchmark"
@@ -53,6 +54,11 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         seed: List[int] = [0, 1234, 1234, 1234],
         max_tokens: int = 32768,
         version: Union[str, int] = "v2",
+        dataset_repo: str = OFFICIAL_DATASET_REPO,
+        dataset_split: str = "test",
+        cache_dir: Optional[str] = HF_HUB_CACHE,
+        contest_months: Optional[List[str]] = None,
+        n_repeat: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
         system_instruction: Optional[str] = None,
     ):
@@ -63,6 +69,11 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
             debug: If set, only evaluate on 2 examples
             seed: Random seed for reproducibility. Default is [0, 1234, 1234, 1234] for lm-eval-harness.
             version: LiveCodeBench release version, e.g. 2, "v2", "release_v2", 5, or 6.
+            dataset_repo: Hugging Face dataset repo to load from.
+            dataset_split: Split name to load.
+            cache_dir: Dataset cache directory.
+            contest_months: Optional YYYY-MM prefixes to filter by contest date.
+            n_repeat: Optional override for how many times each sample is generated.
             logger: Optional logger instance
             system_instruction: Optional system instruction for the model
         """
@@ -70,8 +81,12 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
         self.debug = debug
         self.max_new_tokens = max_tokens
         self.seed = seed
+        self.dataset_repo = dataset_repo
+        self.dataset_split = dataset_split
+        self.cache_dir = cache_dir
+        self.contest_months = set(contest_months) if contest_months else None
         self.version_tag = self._normalize_version_tag(version)
-        self.n_repeat = 6 if self.version_tag == "release_v2" else 3
+        self.n_repeat = n_repeat if n_repeat is not None else self._default_repeat_count(self.version_tag)
 
     @staticmethod
     def _normalize_version_tag(version: Union[str, int]) -> str:
@@ -91,6 +106,10 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
             supported = ", ".join(sorted(supported_versions))
             raise ValueError(f"Unsupported LiveCodeBench version '{version}'. Expected one of: {supported}")
         return version_tag
+
+    @staticmethod
+    def _default_repeat_count(version_tag: str) -> int:
+        return 6 if version_tag == "release_v2" else 3
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
@@ -377,17 +396,20 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
 
     def load_questions(self) -> Dataset:
         """Load LiveCodeBench questions from source."""
-        self.logger.info(
-            f"Loading LiveCodeBench questions from source and converting to dataset for {self.version_tag}..."
-        )
+        self.logger.info(f"Loading LiveCodeBench questions from {self.dataset_repo} for {self.version_tag}...")
         cpu_count = os.cpu_count()
-        ds = load_dataset(
-            "livecodebench/code_generation_lite",
-            version_tag=self.version_tag,
-            split="test",
-            trust_remote_code=True,
-            cache_dir=HF_HUB_CACHE,
-        )
+        dataset_kwargs = {
+            "split": self.dataset_split,
+            "cache_dir": self.cache_dir,
+            "trust_remote_code": True,
+        }
+        if self.dataset_repo == OFFICIAL_DATASET_REPO:
+            dataset_kwargs["version_tag"] = self.version_tag
+
+        ds = load_dataset(self.dataset_repo, **dataset_kwargs)
+        if self.contest_months is not None:
+            ds = ds.filter(lambda example: example["contest_date"][:7] in self.contest_months)
+
         # Avoids "pyarrow.lib.ArrowInvalid: offset overflow while concatenating arrays" when mapping
         processed_shards = []
         num_shards = 4
