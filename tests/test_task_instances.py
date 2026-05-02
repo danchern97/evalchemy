@@ -364,6 +364,19 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(benchmark.data_file))
         self.assertTrue(benchmark.data_file.endswith("eval/chat_benchmarks/AIME24/data/aime24.json"))
 
+    def test_math500_task_manager_and_task_instances_work(self):
+        from eval.task import TaskManager
+
+        task_manager = TaskManager(task_list=["MATH500"], debug=True)
+        benchmark = task_manager.get_benchmark("MATH500")
+
+        self.assertIsNotNone(benchmark)
+        task = benchmark.task_instances()[0]
+
+        self.assertEqual(task.request_type, "generate_until")
+        self.assertEqual(task.generation_kwargs["max_new_tokens"], 32768)
+        self.assertEqual(task.evaluate(r"\boxed{42}")["supported"], True)
+
     def test_livecodebench_version_passthrough_and_repeat_defaults(self):
         from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark
 
