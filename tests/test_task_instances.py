@@ -377,6 +377,21 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertEqual(task.generation_kwargs["max_new_tokens"], 32768)
         self.assertEqual(task.evaluate(r"\boxed{42}")["supported"], True)
 
+    def test_mbppplus_task_manager_and_task_instances_work(self):
+        from eval.task import TaskManager
+
+        task_manager = TaskManager(task_list=["MBPPPlus"], debug=True)
+        benchmark = task_manager.get_benchmark("MBPPPlus")
+
+        self.assertIsNotNone(benchmark)
+        task = benchmark.task_instances()[0]
+
+        self.assertEqual(task.request_type, "generate_until")
+        self.assertEqual(task.generation_kwargs["max_new_tokens"], 1024)
+        result = task.evaluate("```python\ndef foo():\n    return 42\n```")
+        self.assertTrue(result["supported"])
+        self.assertIn("pass@1", result["result"])
+
     def test_livecodebench_version_passthrough_and_repeat_defaults(self):
         from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark
 

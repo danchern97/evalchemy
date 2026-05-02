@@ -1,6 +1,5 @@
 import os
 import sys
-import fire
 import json
 import gzip
 import regex

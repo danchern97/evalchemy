@@ -561,10 +561,15 @@ def check_correctness(
             os.chdir(origin_path)
             shutil.rmtree(tmp_dir)
 
-    manager = multiprocessing.Manager()
+    try:
+        mp_context = multiprocessing.get_context("fork")
+    except ValueError:
+        mp_context = multiprocessing.get_context()
+
+    manager = mp_context.Manager()
     result = manager.list()
 
-    p = multiprocessing.Process(target=unsafe_execute, args=(tmp_dir,))
+    p = mp_context.Process(target=unsafe_execute, args=(tmp_dir,))
     p.start()
     p.join(timeout=timeout + 1)
     if p.is_alive():

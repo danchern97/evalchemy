@@ -9,9 +9,10 @@ import logging
 
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from mbpp_plus.evaluation import evaluate_functional_correctness
+from .mbpp_plus.evaluation import evaluate_functional_correctness
 from .utils.utils import extract_generation_code, language_settings
 from eval.task import BaseBenchmark
+from eval.task import TaskInstance
 
 
 class MBPPPlusBenchmark(BaseBenchmark):
@@ -226,6 +227,7 @@ Here is my problem:
             timeout=self.timeout,
             problem_file=problem_file,
             language="python",
+            is_mbpp=True,
         )
 
         for metric, value in result.items():
@@ -235,6 +237,40 @@ Here is my problem:
 
         temp_dir_obj.cleanup()
         return evaluation_results
+
+    def evaluate_task_instance(self, task_instance: TaskInstance, raw_output: str) -> Dict[str, Any]:
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file_path = os.path.join(temp_dir, "generated_python.jsonl")
+                sample = {
+                    "task_id": task_instance.doc["task_id"],
+                    "generation": self.extract_code(raw_output),
+                }
+                with open(temp_file_path, "w", encoding="utf-8") as fw:
+                    fw.write(json.dumps(sample) + "\n")
+
+                result = evaluate_functional_correctness(
+                    input_file=temp_file_path,
+                    tmp_dir=temp_dir,
+                    n_workers=self.num_workers,
+                    timeout=self.timeout,
+                    problem_file=os.path.join(self.data_dir, "mbppplus.jsonl"),
+                    language="python",
+                    is_mbpp=True,
+                    k=[1],
+                )
+
+            return {
+                "supported": True,
+                "raw_output": raw_output,
+                "result": result,
+            }
+        except Exception as exc:
+            return {
+                "supported": False,
+                "raw_output": raw_output,
+                "reason": f"Benchmark evaluator could not score one sample: {exc}",
+            }
 
     def run_benchmark(self, model: LM) -> Dict[str, float]:
         """
