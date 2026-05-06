@@ -391,6 +391,12 @@ class TaskInstanceTests(unittest.TestCase):
         result = task.evaluate("```python\ndef foo():\n    return 42\n```")
         self.assertTrue(result["supported"])
         self.assertIn("pass@1", result["result"])
+        self.assertIn("public_test_results", result)
+        self.assertIn("private_test_results", result)
+        self.assertGreater(len(result["public_test_results"]), 0)
+        self.assertGreater(len(result["private_test_results"]), 0)
+        self.assertFalse(result["public_test_results"][0]["passed"])
+        self.assertFalse(result["private_test_results"][0]["passed"])
 
     def test_mbppplus_process_humaneval_test_handles_string_test_field(self):
         from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import process_humaneval_test

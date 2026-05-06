@@ -1,18 +1,236 @@
 from typing import Dict, List, Any, Optional, Generator
+import ast
 import json
+import multiprocessing
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from tqdm import tqdm
 import logging
 
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from .mbpp_plus.evaluation import evaluate_functional_correctness
+from .mbpp_plus.evaluation import (
+    IMPORT_HELPER,
+    evaluate_functional_correctness,
+    get_task_timeout,
+    normalize_mbpp_test,
+    read_dataset,
+)
+from .mbpp_plus.execution import TimeoutException, reliability_guard, swallow_io, time_limit
 from .utils.utils import extract_generation_code, language_settings
 from eval.task import BaseBenchmark
 from eval.task import TaskInstance
+
+
+def _safe_repr(value: Any, max_length: int = 500) -> str:
+    text = repr(value)
+    if len(text) > max_length:
+        return text[: max_length - 3] + "..."
+    return text
+
+
+def _get_mp_context():
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
+
+
+def _run_public_feedback_worker(generation: str, public_tests: List[str], timeout: float, result_list):
+    reliability_guard()
+    namespace = {}
+    try:
+        with swallow_io():
+            with time_limit(timeout):
+                exec("\n".join(IMPORT_HELPER["python"]) + "\n" + generation, namespace)
+    except TimeoutException:
+        for idx, test_case in enumerate(public_tests):
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": False,
+                    "details": "Timed out while preparing generated code.",
+                    "output": None,
+                    "time_elapsed": float("inf"),
+                }
+            )
+        return
+    except BaseException as exc:
+        for idx, test_case in enumerate(public_tests):
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": False,
+                    "details": f"Generated code failed before running tests: {exc}",
+                    "output": None,
+                    "time_elapsed": 0.0,
+                }
+            )
+        return
+
+    for idx, test_case in enumerate(public_tests):
+        start = time.time()
+        try:
+            with swallow_io():
+                with time_limit(timeout):
+                    exec(test_case, namespace)
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": True,
+                    "details": "Public test passed.",
+                    "output": None,
+                    "time_elapsed": time.time() - start,
+                }
+            )
+        except TimeoutException:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": False,
+                    "details": "Public test timed out.",
+                    "output": None,
+                    "time_elapsed": float("inf"),
+                }
+            )
+        except AssertionError as exc:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": False,
+                    "details": f"Public test failed: AssertionError{': ' + str(exc) if str(exc) else ''}",
+                    "output": None,
+                    "time_elapsed": time.time() - start,
+                }
+            )
+        except BaseException as exc:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": test_case,
+                    "passed": False,
+                    "details": f"Public test failed with error: {exc}",
+                    "output": None,
+                    "time_elapsed": time.time() - start,
+                }
+            )
+
+
+def _run_private_feedback_worker(
+    generation: str,
+    setup_code: str,
+    actual_expr: str,
+    expected_expr: str,
+    timeout: float,
+    result_list,
+):
+    reliability_guard()
+    namespace = {}
+    try:
+        with swallow_io():
+            with time_limit(timeout):
+                exec(generation + "\n" + setup_code, namespace)
+    except TimeoutException:
+        result_list.append(
+            {
+                "test_index": 0,
+                "test_case": None,
+                "passed": False,
+                "details": "Timed out while preparing generated code and private tests.",
+                "output": None,
+                "expected": None,
+                "time_elapsed": float("inf"),
+            }
+        )
+        return
+    except BaseException as exc:
+        result_list.append(
+            {
+                "test_index": 0,
+                "test_case": None,
+                "passed": False,
+                "details": f"Generated code or private test setup failed: {exc}",
+                "output": None,
+                "expected": None,
+                "time_elapsed": 0.0,
+            }
+        )
+        return
+
+    inputs = namespace.get("inputs", [])
+    results = namespace.get("results")
+    assertion = namespace.get("assertion")
+    for idx, inp in enumerate(inputs):
+        start = time.time()
+        local_namespace = dict(namespace)
+        local_namespace["i"] = idx
+        local_namespace["inp"] = inp
+        if results is not None:
+            local_namespace["exp"] = results[idx]
+
+        output = None
+        expected = None
+        try:
+            with swallow_io():
+                with time_limit(timeout):
+                    expected = eval(expected_expr, local_namespace)
+                    output = eval(actual_expr, local_namespace)
+                    assertion(output, expected, 0)
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": {"input": inp},
+                    "passed": True,
+                    "details": f"Private test passed with output {_safe_repr(output)}.",
+                    "output": output,
+                    "expected": expected,
+                    "time_elapsed": time.time() - start,
+                }
+            )
+        except TimeoutException:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": {"input": inp},
+                    "passed": False,
+                    "details": "Private test timed out.",
+                    "output": output,
+                    "expected": expected,
+                    "time_elapsed": float("inf"),
+                }
+            )
+        except AssertionError as exc:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": {"input": inp},
+                    "passed": False,
+                    "details": str(exc) or f"Expected {_safe_repr(expected)}, but got {_safe_repr(output)}.",
+                    "output": output,
+                    "expected": expected,
+                    "time_elapsed": time.time() - start,
+                }
+            )
+        except BaseException as exc:
+            result_list.append(
+                {
+                    "test_index": idx,
+                    "test_case": {"input": inp},
+                    "passed": False,
+                    "details": f"Private test failed with error: {exc}",
+                    "output": output,
+                    "expected": expected,
+                    "time_elapsed": time.time() - start,
+                }
+            )
 
 
 class MBPPPlusBenchmark(BaseBenchmark):
@@ -250,17 +468,106 @@ Here is my problem:
         temp_dir_obj.cleanup()
         return evaluation_results
 
+    @staticmethod
+    def _run_feedback_worker(target, args: tuple, timeout: float) -> List[Dict[str, Any]]:
+        mp_context = _get_mp_context()
+        manager = mp_context.Manager()
+        result_list = manager.list()
+        process = mp_context.Process(target=target, args=(*args, result_list))
+        process.start()
+        process.join(timeout + 1)
+        if process.is_alive():
+            process.kill()
+            process.join()
+            result_list.append(
+                {
+                    "test_index": len(result_list),
+                    "test_case": None,
+                    "passed": False,
+                    "details": "Timed out while collecting test feedback.",
+                    "output": None,
+                    "time_elapsed": float("inf"),
+                }
+            )
+        results = list(result_list)
+        manager.shutdown()
+        return results
+
+    def evaluate_public_test_cases(
+        self, example: Dict[str, Any], generation: str, timeout: float
+    ) -> List[Dict[str, Any]]:
+        public_tests = example.get("test_list") or []
+        if not public_tests:
+            return []
+        return self._run_feedback_worker(
+            _run_public_feedback_worker,
+            (generation, public_tests, timeout),
+            timeout * max(len(public_tests), 1),
+        )
+
+    @staticmethod
+    def _split_private_feedback_test(test: str):
+        test = normalize_mbpp_test(test)
+        match = re.search(r"\nfor i,\s*(?:\(inp,\s*exp\)|inp)\s+in\s+enumerate\(.*?\):\n(?P<body>.*)$", test, re.DOTALL)
+        if not match:
+            return None, None, None
+
+        setup_code = test[: match.start()]
+        assertion_line = None
+        for line in match.group("body").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("assertion("):
+                assertion_line = stripped
+                break
+        if assertion_line is None:
+            return None, None, None
+
+        call = ast.parse(assertion_line).body[0].value
+        if not isinstance(call, ast.Call) or len(call.args) < 2:
+            return None, None, None
+
+        return setup_code, ast.unparse(call.args[0]), ast.unparse(call.args[1])
+
+    def evaluate_private_test_cases(
+        self, example: Dict[str, Any], generation: str, timeout: float
+    ) -> List[Dict[str, Any]]:
+        test = example.get("test")
+        if not isinstance(test, str):
+            return []
+
+        setup_code, actual_expr, expected_expr = self._split_private_feedback_test(test)
+        if setup_code is None:
+            return [
+                {
+                    "test_index": 0,
+                    "test_case": None,
+                    "passed": False,
+                    "details": "Private test feedback is unavailable for this test format.",
+                    "output": None,
+                    "expected": None,
+                    "time_elapsed": 0.0,
+                }
+            ]
+
+        return self._run_feedback_worker(
+            _run_private_feedback_worker,
+            (generation, setup_code, actual_expr, expected_expr, timeout),
+            timeout * max(len(example.get("test_list") or []), 1) + 5,
+        )
+
     def evaluate_task_instance(self, task_instance: TaskInstance, raw_output: str) -> Dict[str, Any]:
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_file_path = os.path.join(temp_dir, "generated_python.jsonl")
+                generation = self.extract_code(raw_output)
                 sample = {
                     "task_id": task_instance.doc["task_id"],
-                    "generation": self.extract_code(raw_output),
+                    "generation": generation,
                 }
                 with open(temp_file_path, "w", encoding="utf-8") as fw:
                     fw.write(json.dumps(sample) + "\n")
 
+                task_timeout = get_task_timeout(task_instance.doc["task_id"], self.timeout, self.task_timeouts)
                 result = evaluate_functional_correctness(
                     input_file=temp_file_path,
                     tmp_dir=temp_dir,
@@ -272,11 +579,16 @@ Here is my problem:
                     k=[1],
                     task_timeouts=self.task_timeouts,
                 )
+                problem = read_dataset(os.path.join(self.data_dir, "mbppplus.jsonl"))[task_instance.doc["task_id"]]
+                public_test_results = self.evaluate_public_test_cases(problem, generation, task_timeout)
+                private_test_results = self.evaluate_private_test_cases(problem, generation, task_timeout)
 
             return {
                 "supported": True,
                 "raw_output": raw_output,
                 "result": result,
+                "public_test_results": public_test_results,
+                "private_test_results": private_test_results,
             }
         except Exception as exc:
             return {
