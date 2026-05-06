@@ -392,6 +392,63 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertTrue(result["supported"])
         self.assertIn("pass@1", result["result"])
 
+    def test_mbppplus_process_humaneval_test_handles_string_test_field(self):
+        from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import process_humaneval_test
+
+        sample = {"task_id": "task-1", "generation": "def f():\n    return 1"}
+        problems = {"task-1": {"test": "assert f() == 1"}}
+
+        test_code = process_humaneval_test(sample, problems, is_mbpp=True)
+
+        self.assertEqual(test_code, "def f():\n    return 1\nassert f() == 1")
+
+    def test_mbppplus_reliability_guard_keeps_os_putenv_for_numpy_imports(self):
+        from eval.chat_benchmarks.MBPPPlus.mbpp_plus import execution as mbpp_exec
+
+        original_putenv = os.putenv
+        original_environ = os.environ.copy()
+        original_os_attrs = {
+            name: getattr(os, name)
+            for name in [
+                "kill",
+                "system",
+                "remove",
+                "removedirs",
+                "rmdir",
+                "fchdir",
+                "setuid",
+                "fork",
+                "forkpty",
+                "killpg",
+                "rename",
+                "renames",
+                "truncate",
+                "replace",
+                "unlink",
+                "fchmod",
+                "fchown",
+                "chmod",
+                "chown",
+                "chroot",
+                "lchflags",
+                "lchmod",
+                "lchown",
+                "getcwd",
+                "chdir",
+            ]
+            if hasattr(os, name)
+        }
+
+        try:
+            mbpp_exec.reliability_guard()
+            self.assertIs(os.putenv, original_putenv)
+        finally:
+            os.putenv = original_putenv
+            os.environ.clear()
+            os.environ.update(original_environ)
+            for name, value in original_os_attrs.items():
+                setattr(os, name, value)
+
     def test_livecodebench_version_passthrough_and_repeat_defaults(self):
         from eval.chat_benchmarks.LiveCodeBench.eval_instruct import LiveCodeBenchBenchmark
 

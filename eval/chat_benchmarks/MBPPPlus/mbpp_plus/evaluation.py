@@ -127,7 +127,10 @@ def process_humaneval_test(sample, problems, example_test=False, is_mbpp=False, 
     """
     task_id = sample["task_id"]
     if is_mbpp:
-        return sample["generation"] + "\n" + "\n".join(problems[task_id]["test"])
+        test = problems[task_id]["test"]
+        if isinstance(test, list):
+            test = "\n".join(test)
+        return sample["generation"] + "\n" + test
 
     prompt = sample["prompt"]
     if example_test and "example_test" in problems[task_id] and problems[task_id]["example_test"] != "":

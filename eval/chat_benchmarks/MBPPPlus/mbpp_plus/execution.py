@@ -712,7 +712,6 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
 
     os.kill = None
     os.system = None
-    os.putenv = None
     os.remove = None
     os.removedirs = None
     os.rmdir = None
@@ -740,7 +739,6 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
 
     import shutil
 
-    shutil.rmtree = None
     shutil.move = None
     shutil.chown = None
 
