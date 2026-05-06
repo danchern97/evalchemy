@@ -75,6 +75,71 @@ LANGUAGE_NAME = {
     "python": "Python",
 }
 
+MBPP_NUMERIC_ASSERTION_HELPER = """def is_floats(x) -> bool:
+    # check if it is float; List[float]; Tuple[float]
+    if isinstance(x, float):
+        return True
+    if isinstance(x, (list, tuple)):
+        return all(isinstance(i, float) for i in x)
+    if isinstance(x, np.ndarray):
+        return x.dtype == np.float64 or x.dtype == np.float32
+    return False
+
+
+def assertion(out, exp, atol):
+    if atol == 0 and is_floats(exp):
+        atol = 1e-6
+    if out != exp and atol != 0:
+        assert np.allclose(out, exp, rtol=1e-07, atol=atol)
+    else:
+        assert out == exp, f"out: {out}, exp: {exp}"
+"""
+
+MBPP_RECURSIVE_NUMERIC_ASSERTION_HELPER = """def is_floats(x) -> bool:
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, (float, complex, np.floating, np.complexfloating)):
+        return True
+    if isinstance(x, (list, tuple)):
+        return any(is_floats(i) for i in x)
+    if isinstance(x, np.ndarray):
+        return np.issubdtype(x.dtype, np.floating) or np.issubdtype(x.dtype, np.complexfloating)
+    return False
+
+
+def numeric_close(out, exp, atol):
+    if not isinstance(out, (list, tuple, np.ndarray)) and not isinstance(exp, (list, tuple, np.ndarray)):
+        try:
+            if out == exp:
+                return True
+        except Exception:
+            pass
+    if isinstance(out, bool) or isinstance(exp, bool):
+        return out == exp
+    if isinstance(out, (int, np.integer)) and isinstance(exp, (int, np.integer)):
+        return out == exp
+    if isinstance(out, (int, float, complex, np.number)) and isinstance(exp, (int, float, complex, np.number)):
+        return abs(out - exp) <= atol + 1e-07 * abs(exp)
+    if isinstance(out, np.ndarray) or isinstance(exp, np.ndarray):
+        if np.array_equal(out, exp):
+            return True
+        return np.allclose(out, exp, rtol=1e-07, atol=atol)
+    if isinstance(out, (list, tuple)) and isinstance(exp, (list, tuple)) and len(out) == len(exp):
+        return all(numeric_close(out_i, exp_i, atol) for out_i, exp_i in zip(out, exp))
+    return out == exp
+
+
+def assertion(out, exp, atol):
+    if atol == 0 and is_floats(exp):
+        atol = 1e-6
+    assert numeric_close(out, exp, atol), f"out: {out}, exp: {exp}"
+"""
+
+
+def normalize_mbpp_test(test: str) -> str:
+    """Patch MBPP+ numeric assertions to support nested numeric structures."""
+    return test.replace(MBPP_NUMERIC_ASSERTION_HELPER, MBPP_RECURSIVE_NUMERIC_ASSERTION_HELPER)
+
 
 def read_dataset(
     data_file: str = None,
@@ -130,6 +195,8 @@ def process_humaneval_test(sample, problems, example_test=False, is_mbpp=False, 
         test = problems[task_id]["test"]
         if isinstance(test, list):
             test = "\n".join(test)
+        else:
+            test = normalize_mbpp_test(test)
         return sample["generation"] + "\n" + test
 
     prompt = sample["prompt"]
@@ -205,6 +272,20 @@ def stream_jsonl_all(filename: str) -> Iterable[Dict]:
     return results
 
 
+def get_task_timeout(task_id: Any, default_timeout: float, task_timeouts: Optional[Dict[Any, float]] = None) -> float:
+    if not task_timeouts:
+        return default_timeout
+    if task_id in task_timeouts:
+        return task_timeouts[task_id]
+    task_id_str = str(task_id)
+    if task_id_str in task_timeouts:
+        return task_timeouts[task_id_str]
+    try:
+        return task_timeouts.get(int(task_id_str), default_timeout)
+    except ValueError:
+        return default_timeout
+
+
 def evaluate_functional_correctness(
     input_file: str = None,
     tmp_dir: str = "./",
@@ -217,6 +298,7 @@ def evaluate_functional_correctness(
     example_test: bool = False,
     is_mbpp: bool = False,
     language: str = "python",
+    task_timeouts: Optional[Dict[Any, float]] = None,
 ):
     """
     Evaluates the functional correctness of a model.
@@ -245,7 +327,8 @@ def evaluate_functional_correctness(
                 sample["test_code"] = process_humaneval_test(sample, problems, example_test, language)
                 if sample["test_code"] is None:
                     continue
-                args = (task_id, sample, lang, timeout, tmp_dir_, completion_id[task_id])
+                task_timeout = get_task_timeout(task_id, timeout, task_timeouts)
+                args = (task_id, sample, lang, task_timeout, tmp_dir_, completion_id[task_id])
                 future = executor.submit(check_correctness, *args)
                 futures.append(future)
                 completion_id[task_id] += 1
@@ -269,7 +352,8 @@ def evaluate_functional_correctness(
                     completion_id_ = sample["completion_id"]
                 else:
                     completion_id_ = completion_id[task_id]
-                args = (task_id, sample, lang, timeout, tmp_dir_, completion_id_)
+                task_timeout = get_task_timeout(task_id, timeout, task_timeouts)
+                args = (task_id, sample, lang, task_timeout, tmp_dir_, completion_id_)
                 future = executor.submit(check_correctness, *args)
                 futures.append(future)
                 completion_id[task_id] += 1

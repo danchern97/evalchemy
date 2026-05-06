@@ -402,6 +402,58 @@ class TaskInstanceTests(unittest.TestCase):
 
         self.assertEqual(test_code, "def f():\n    return 1\nassert f() == 1")
 
+    def test_mbppplus_private_test_assertion_accepts_nested_numeric_tolerance(self):
+        from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import process_humaneval_test
+
+        sample = {
+            "task_id": "task-1",
+            "generation": "def f():\n    return ((1.000000000000001,), 2 + 0j, 10**200, float('inf'))",
+        }
+        problems = {
+            "task-1": {
+                "test": """import numpy as np
+from math import inf
+
+def is_floats(x) -> bool:
+    # check if it is float; List[float]; Tuple[float]
+    if isinstance(x, float):
+        return True
+    if isinstance(x, (list, tuple)):
+        return all(isinstance(i, float) for i in x)
+    if isinstance(x, np.ndarray):
+        return x.dtype == np.float64 or x.dtype == np.float32
+    return False
+
+
+def assertion(out, exp, atol):
+    if atol == 0 and is_floats(exp):
+        atol = 1e-6
+    if out != exp and atol != 0:
+        assert np.allclose(out, exp, rtol=1e-07, atol=atol)
+    else:
+        assert out == exp, f"out: {out}, exp: {exp}"
+
+assertion(f(), ((1.0,), 2 + 1e-15j, 10**200, float('inf')), 0)
+"""
+            }
+        }
+
+        test_code = process_humaneval_test(sample, problems, is_mbpp=True)
+
+        self.assertIn("def numeric_close", test_code)
+        exec(test_code, {})
+
+    def test_mbppplus_task_timeout_overrides_are_task_specific(self):
+        from eval.chat_benchmarks.MBPPPlus.eval_instruct import MBPPPlusBenchmark
+        from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import get_task_timeout
+
+        benchmark = MBPPPlusBenchmark(debug=True)
+
+        self.assertEqual(get_task_timeout(255, benchmark.timeout, benchmark.task_timeouts), 120.0)
+        self.assertEqual(get_task_timeout("255", benchmark.timeout, benchmark.task_timeouts), 120.0)
+        self.assertEqual(get_task_timeout(630, benchmark.timeout, benchmark.task_timeouts), 30.0)
+        self.assertEqual(get_task_timeout(1, benchmark.timeout, benchmark.task_timeouts), 3.0)
+
     def test_mbppplus_reliability_guard_keeps_os_putenv_for_numpy_imports(self):
         from eval.chat_benchmarks.MBPPPlus.mbpp_plus import execution as mbpp_exec
 

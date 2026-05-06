@@ -20,11 +20,20 @@ class MBPPPlusBenchmark(BaseBenchmark):
     MBPPPlus benchmark for evaluating code generation capabilities across different languages.
     """
 
+    DEFAULT_TASK_TIMEOUTS = {
+        255: 120.0,
+        271: 30.0,
+        392: 30.0,
+        599: 30.0,
+        630: 30.0,
+    }
+
     def __init__(
         self,
         data_dir: str = "eval/chat_benchmarks/MBPPPlus/data",
         num_workers: int = 8,
         timeout: float = 3.0,
+        task_timeouts: Optional[Dict[int, float]] = None,
         debug: bool = False,
         max_tokens: int = 1024,
         logger: Optional[logging.Logger] = None,
@@ -38,6 +47,7 @@ class MBPPPlusBenchmark(BaseBenchmark):
             max_tokens: Maximum number of tokens for generation
             num_workers: Number of workers for parallel evaluation
             timeout: Timeout for code execution
+            task_timeouts: Optional per-task timeout overrides for slow private tests
             debug: If True, only evaluate first 2 examples
             logger: Optional logger instance
             system_instruction: Optional system instruction for the model
@@ -47,6 +57,7 @@ class MBPPPlusBenchmark(BaseBenchmark):
         self.max_tokens = max_tokens
         self.num_workers = num_workers
         self.timeout = timeout
+        self.task_timeouts = dict(self.DEFAULT_TASK_TIMEOUTS if task_timeouts is None else task_timeouts)
         self.debug = debug
         self.num_examples = 3
         self.start_idx = 0
@@ -228,6 +239,7 @@ Here is my problem:
             problem_file=problem_file,
             language="python",
             is_mbpp=True,
+            task_timeouts=self.task_timeouts,
         )
 
         for metric, value in result.items():
@@ -258,6 +270,7 @@ Here is my problem:
                     language="python",
                     is_mbpp=True,
                     k=[1],
+                    task_timeouts=self.task_timeouts,
                 )
 
             return {
