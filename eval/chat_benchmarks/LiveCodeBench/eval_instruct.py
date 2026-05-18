@@ -12,11 +12,12 @@ from datasets import Dataset, concatenate_datasets, load_dataset
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 
-from eval.task import BaseBenchmark
+from eval.task import BaseBenchmark, TaskInstance
 
 from .livecodebench_utils import (
     lcb_run,
     lcb_run_test_cases,
+    lcb_run_test_sets,
     map_to_example,
     post_process_code,
     translate_private_test_cases,
@@ -44,6 +45,8 @@ def calc_stats(values):
     if mask.sum() == 0:  # all NaNs → undefined; return 0,0
         return 0.0, 0.0
     mean = arr[mask].mean()
+    if mask.sum() < 2:
+        return mean, 0.0
     stderr = np.std(arr[mask], ddof=1) / np.sqrt(mask.sum())
     return mean, stderr
 
@@ -229,6 +232,95 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
             }
             for idx, (test_case, (passed, details, output, time_elapsed)) in enumerate(zip(public_test_cases, results))
         ]
+
+    @staticmethod
+    def _format_test_results(test_cases: List[Dict[str, Any]], results: List[tuple]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "test_index": idx,
+                "test_case": test_case,
+                "passed": passed,
+                "details": details,
+                "output": output,
+                "time_elapsed": time_elapsed,
+            }
+            for idx, (test_case, (passed, details, output, time_elapsed)) in enumerate(zip(test_cases, results))
+        ]
+
+    @staticmethod
+    def _extract_completion_code(raw_output: str) -> Optional[str]:
+        code_blocks = has_code(raw_output)
+        if code_blocks:
+            return post_process_code(code_blocks[-1])
+        stripped = raw_output.strip()
+        return stripped or None
+
+    @staticmethod
+    def _single_sample_metrics(example: Dict[str, Any], response_entry: Dict[str, Any]) -> Dict[str, Any]:
+        solved = int(response_entry["correctness"])
+        accuracy = float(solved)
+        difficulty = example.get("difficulty")
+        return {
+            "accuracy_avg": accuracy,
+            "accuracy_std_err": 0.0,
+            "num_total": 1,
+            "solved_avg": accuracy,
+            "num_repeat": 1,
+            "raw_metrics": [
+                {
+                    "total_correct": solved,
+                    "total_finish": 1,
+                    "accuracy": accuracy,
+                    "per_difficulty_correct": {difficulty: solved},
+                    "per_difficulty_total": {difficulty: 1},
+                }
+            ],
+            "run_stats": [{"repetition": 1, "num_total": 1, "num_solved": solved, "accuracy": accuracy}],
+            "examples": [response_entry],
+        }
+
+    def evaluate_task_instance(self, task_instance: TaskInstance, raw_output: str) -> Dict[str, Any]:
+        example = copy.deepcopy(task_instance.doc)
+        code = self._extract_completion_code(raw_output)
+        response_entry = {
+            "content": code,
+            "difficulty": example.get("difficulty"),
+            "correctness": False,
+            "reason": "Does not contain code component." if code is None else "Code is incorrect.",
+            "public_test_results": [],
+            "private_test_results": [],
+        }
+
+        if code is not None:
+            public_test_cases = self._parse_public_test_cases(example.get("public_test_cases"))
+            private_test_cases = example.get("test") or []
+            is_extracted = not example.get("is_stdin", False)
+            result_sets = lcb_run_test_sets(
+                private_test_cases=private_test_cases,
+                public_test_cases=public_test_cases,
+                completion=code,
+                timeout=6,
+                is_extracted=is_extracted,
+            )
+            private_results = result_sets["private"]
+            public_results = result_sets["public"]
+            correctness = bool(private_results) and all(passed for passed, *_ in private_results)
+            response_entry.update(
+                {
+                    "correctness": correctness,
+                    "reason": "" if correctness else "Code is incorrect.",
+                    "public_test_results": self._format_test_results(public_test_cases, public_results),
+                    "private_test_results": self._format_test_results(private_test_cases, private_results),
+                }
+            )
+
+        return {
+            "supported": True,
+            "raw_output": raw_output,
+            "result": self._single_sample_metrics(example, response_entry),
+            "public_test_results": response_entry["public_test_results"],
+            "private_test_results": response_entry["private_test_results"],
+        }
 
     def evaluate_single_example(self, example):
         """Helper function to evaluate a single example"""

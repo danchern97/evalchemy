@@ -6,6 +6,7 @@ import ast
 import base64
 import builtins
 import copy
+import contextlib
 import faulthandler
 import io
 import json
@@ -17,6 +18,25 @@ import zlib
 from typing import Callable, Dict, Optional
 
 import scipy.stats as stats
+
+
+def _get_mp_context():
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
+
+
+def _safe_text(value, max_length=1000):
+    text = str(value)
+    if len(text) > max_length:
+        return text[: max_length - 3] + "..."
+    return text
+
+
+def _safe_test_result(result):
+    passed, details, output, time_elapsed = result
+    return passed, _safe_text(details), _safe_text(output), time_elapsed
 
 
 def reliability_guard(maximum_memory_bytes: Optional[int] = None):
@@ -140,43 +160,29 @@ def prepare_test_input_output_std(test_case):
 
 def run_test_func(completion, is_extracted, test_input, test_output):
     namespace = {}
-    exec(completion, namespace)
-    func_name = completion.split("(")[0].split()[-1]
-
-    output = io.StringIO()
-    sys.stdout = output
-
-    try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        exec(completion, namespace)
         if not is_extracted:
+            func_name = completion.split("(")[0].split()[-1]
             if isinstance(test_input, dict):
                 result_output = namespace[func_name](**test_input)
             else:
                 result_output = namespace[func_name](test_input)
         else:
+            func_name = completion.split("(")[0].split()[-1]
             result_output = namespace[func_name](*test_input)
 
-        if result_output != test_output:
-            return False, result_output
-
-        return True, result_output
-
-    except Exception as e:
-        error_msg = f"Error: {str(e)}" if not is_extracted else str(e)
-        return False, error_msg
-
-    finally:
-        sys.stdout = sys.__stdout__
+    return result_output == test_output, result_output
 
 
 def run_test_std(completion, test_input, test_output):
-    with io.StringIO() as output:
-        sys.stdout = output
+    with io.StringIO() as output, contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
         sys.stdin = io.StringIO(test_input)
         try:
             exec(f'__name__ = "__main__"\n{completion}' if '__name__ == "__main__"' in completion else completion, {})
             return output.getvalue().strip() == test_output, output.getvalue().strip()
         finally:
-            sys.stdout = sys.__stdout__
+            sys.stdin = sys.__stdin__
 
 
 def prepare_test_input_output_functional(test_case, is_extracted):
@@ -258,7 +264,7 @@ def run_tests_for_one_example(test_cases, completion, result_list, is_extracted)
             output_value = f"Error: {e}."
         if output_error == "":
             output_error = f"For test input: {test_input}. Expected output is: {test_output}, your solution correctly passes this test with output {output_value}."
-        result_list.append((passed, output_error, output_value, time_elapsed))
+        result_list.append(_safe_test_result((passed, output_error, output_value, time_elapsed)))
         if not passed:
             return
 
@@ -268,16 +274,99 @@ def lcb_run(problem, completion, timeout, is_extracted):
     return lcb_run_test_cases(test_cases, completion, timeout, is_extracted)
 
 
-def lcb_run_test_cases(test_cases, completion, timeout, is_extracted):
-    manager = multiprocessing.Manager()
-    result = manager.list()
-    p = multiprocessing.Process(target=run_tests_for_one_example, args=(test_cases, completion, result, is_extracted))
-    p.start()
-    p.join(timeout=(timeout + 1) * len(test_cases) + 5)
-    if p.is_alive():
-        p.kill()
+def lcb_run_test_sets(private_test_cases, public_test_cases, completion, timeout, is_extracted):
+    hard_timeout = (timeout + 1) * max(len(private_test_cases) + len(public_test_cases), 1) + 5
+    result = _run_in_subprocess(
+        _run_test_sets_worker,
+        (private_test_cases, public_test_cases, completion, is_extracted),
+        hard_timeout,
+        {"private": [], "public": []},
+    )
+    return {
+        "private": _pad_timed_out_results(result.get("private", []), len(private_test_cases)),
+        "public": _pad_timed_out_results(result.get("public", []), len(public_test_cases)),
+    }
 
-    # if len(result) < len(test_cases): failed due to timeout
-    for i in range(len(test_cases) - len(result)):
-        result.append((False, f"Time out!.", "Error: Time out!", float("inf")))
+
+def lcb_run_test_cases(test_cases, completion, timeout, is_extracted):
+    hard_timeout = (timeout + 1) * len(test_cases) + 5
+    result = _run_in_subprocess(
+        _run_tests_worker,
+        (test_cases, completion, is_extracted),
+        hard_timeout,
+        [],
+    )
+    return _pad_timed_out_results(result, len(test_cases))
+
+
+def _run_in_subprocess(target, args, timeout, default):
+    context = _get_mp_context()
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(target=target, args=(*args, child_conn))
+    process.start()
+    child_conn.close()
+
+    deadline = time.time() + timeout
+    while process.is_alive() and time.time() < deadline:
+        if parent_conn.poll(0.1):
+            return _finish_process(process, parent_conn, default)
+
+    process.join(0)
+    if process.is_alive():
+        process.kill()
+        process.join()
+    try:
+        if parent_conn.poll():
+            return parent_conn.recv()
+    except (EOFError, OSError):
+        pass
+    finally:
+        parent_conn.close()
+    return default
+
+
+def _finish_process(process, parent_conn, default):
+    try:
+        result = parent_conn.recv()
+    except (EOFError, OSError):
+        result = default
+    process.join(1)
+    if process.is_alive():
+        process.kill()
+        process.join()
+    parent_conn.close()
+    return result
+
+
+def _run_tests_worker(test_cases, completion, is_extracted, conn):
+    result = []
+    try:
+        run_tests_for_one_example(test_cases, completion, result, is_extracted)
+        conn.send(result)
+    except BaseException as exc:
+        conn.send([(False, f"Evaluation error: {_safe_text(exc)}.", f"Error: {_safe_text(exc)}", float("inf"))])
+    finally:
+        conn.close()
+
+
+def _run_test_sets_worker(private_test_cases, public_test_cases, completion, is_extracted, conn):
+    public_result = []
+    private_result = []
+    try:
+        if public_test_cases:
+            run_tests_for_one_example(public_test_cases, completion, public_result, is_extracted)
+        if private_test_cases:
+            run_tests_for_one_example(private_test_cases, completion, private_result, is_extracted)
+        conn.send({"public": public_result, "private": private_result})
+    except BaseException as exc:
+        error = (False, f"Evaluation error: {_safe_text(exc)}.", f"Error: {_safe_text(exc)}", float("inf"))
+        conn.send({"public": public_result, "private": private_result or [error]})
+    finally:
+        conn.close()
+
+
+def _pad_timed_out_results(result, num_test_cases):
+    result = list(result)
+    for _ in range(num_test_cases - len(result)):
+        result.append((False, "Time out!.", "Error: Time out!", float("inf")))
     return result

@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -115,6 +116,15 @@ install_numpy_stubs()
 from lm_eval.api.instance import Instance
 
 from eval.task import BaseBenchmark, resolve_package_asset_path
+
+
+def evaluate_mbppplus_task_for_test(index: int, raw_output: str):
+    from eval.task import TaskManager
+
+    task_manager = TaskManager(task_list=["MBPPPlus"], debug=True, timeout=1.0, task_timeouts={})
+    benchmark = task_manager.get_benchmark("MBPPPlus")
+    task = benchmark.task_instances()[index]
+    return task.evaluate(raw_output)["result"]["pass@1"]
 
 
 class SyntheticBenchmark(BaseBenchmark):
@@ -398,6 +408,62 @@ class TaskInstanceTests(unittest.TestCase):
         self.assertFalse(result["public_test_results"][0]["passed"])
         self.assertFalse(result["private_test_results"][0]["passed"])
 
+    def test_mbppplus_task_instance_accepts_raw_python_without_warning(self):
+        from eval.chat_benchmarks.MBPPPlus.eval_instruct import MBPPPlusBenchmark
+
+        benchmark = MBPPPlusBenchmark(debug=True)
+
+        with self.assertNoLogs(benchmark.logger, level="WARNING"):
+            code = benchmark.extract_code("def foo():\n    return 42\n")
+
+        self.assertEqual(code, "def foo():\n    return 42\n")
+
+    def test_mbppplus_task_instance_scores_canonical_solution(self):
+        from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import read_dataset
+        from eval.task import TaskManager
+
+        task_manager = TaskManager(task_list=["MBPPPlus"], debug=True)
+        benchmark = task_manager.get_benchmark("MBPPPlus")
+        task = benchmark.task_instances()[0]
+        problems = read_dataset(os.path.join(benchmark.data_dir, "mbppplus.jsonl"))
+        canonical_code = problems[task.doc["task_id"]]["code"]
+
+        result = task.evaluate(canonical_code)
+
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["result"]["pass@1"], 1.0)
+        self.assertTrue(all(test_result["passed"] for test_result in result["private_test_results"]))
+
+    def test_mbppplus_task_instance_timeout_returns_feedback(self):
+        from eval.task import TaskManager
+
+        task_manager = TaskManager(task_list=["MBPPPlus"], debug=True, timeout=0.2, task_timeouts={})
+        benchmark = task_manager.get_benchmark("MBPPPlus")
+        task = benchmark.task_instances()[0]
+
+        start = time.time()
+        result = task.evaluate("while True:\n    pass\n")
+
+        self.assertLess(time.time() - start, 4)
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["result"]["pass@1"], 0.0)
+        self.assertTrue(
+            any("timed out" in test_result["details"].lower() for test_result in result["private_test_results"])
+        )
+
+    def test_mbppplus_task_instance_parallel_process_pool_smoke(self):
+        import concurrent.futures
+        import multiprocessing
+
+        raw_output = "def definitely_wrong():\n    return 42\n"
+        ctx = multiprocessing.get_context("fork")
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=2, mp_context=ctx) as executor:
+            futures = [executor.submit(evaluate_mbppplus_task_for_test, idx, raw_output) for idx in range(2)]
+            results = [future.result(timeout=15) for future in futures]
+
+        self.assertEqual(results, [0.0, 0.0])
+
     def test_mbppplus_process_humaneval_test_handles_string_test_field(self):
         from eval.chat_benchmarks.MBPPPlus.mbpp_plus.evaluation import process_humaneval_test
 
@@ -587,6 +653,55 @@ assertion(f(), ((1.0,), 2 + 1e-15j, 10**200, float('inf')), 0)
                 }
             ],
         )
+
+    def test_livecodebench_task_instance_uses_direct_single_sample_evaluator(self):
+        from eval.chat_benchmarks.LiveCodeBench import eval_instruct as lcb_module
+        from eval.task import TaskInstance
+
+        benchmark = lcb_module.LiveCodeBenchBenchmark(version="v6", n_repeat=1)
+        task = TaskInstance(
+            id="sample",
+            doc={
+                "task_id": "sample",
+                "difficulty": "easy",
+                "is_stdin": True,
+                "public_test_cases": '[{"input": "", "output": "ok", "testtype": "stdin"}]',
+                "test": [{"input": "", "output": "ok", "testtype": "stdin"}],
+            },
+            request_type="generate_until",
+            prompt=None,
+            generation_kwargs={},
+            _evaluate_fn=benchmark.evaluate_task_instance,
+        )
+
+        with mock.patch.object(
+            lcb_module,
+            "lcb_run_test_sets",
+            return_value={
+                "public": [(True, "public passed", "ok", 0.01)],
+                "private": [(True, "private passed", "ok", 0.02)],
+            },
+        ) as run_test_sets_mock:
+            result = task.evaluate("```python\nprint('ok')\n```")
+
+        run_test_sets_mock.assert_called_once()
+        self.assertTrue(result["supported"])
+        self.assertEqual(result["result"]["accuracy_avg"], 1.0)
+        self.assertEqual(result["public_test_results"][0]["details"], "public passed")
+        self.assertEqual(result["private_test_results"][0]["details"], "private passed")
+
+    def test_livecodebench_runner_suppresses_solution_stdout(self):
+        from eval.chat_benchmarks.LiveCodeBench.livecodebench_utils import lcb_run_test_cases
+
+        completion = "print('ok')"
+        test_cases = [{"input": "", "output": "ok", "testtype": "stdin"}]
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = lcb_run_test_cases(test_cases, completion, timeout=1, is_extracted=False)
+
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertTrue(result[0][0])
 
     def test_task_manager_forwards_livecodebench_version(self):
         from eval.task import TaskManager

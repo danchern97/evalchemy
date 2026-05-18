@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 import time
-from pathlib import Path
 from tqdm import tqdm
 import logging
 
@@ -20,7 +19,6 @@ from .mbpp_plus.evaluation import (
     read_dataset,
 )
 from .mbpp_plus.execution import TimeoutException, reliability_guard, swallow_io, time_limit
-from .utils.utils import extract_generation_code, language_settings
 from eval.task import BaseBenchmark
 from eval.task import TaskInstance
 
@@ -39,8 +37,8 @@ def _get_mp_context():
         return multiprocessing.get_context()
 
 
-def _run_public_feedback_worker(generation: str, public_tests: List[str], timeout: float, result_list):
-    reliability_guard()
+def _evaluate_public_feedback(generation: str, public_tests: List[str], timeout: float) -> List[Dict[str, Any]]:
+    results = []
     namespace = {}
     try:
         with swallow_io():
@@ -48,7 +46,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                 exec("\n".join(IMPORT_HELPER["python"]) + "\n" + generation, namespace)
     except TimeoutException:
         for idx, test_case in enumerate(public_tests):
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -58,10 +56,10 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                     "time_elapsed": float("inf"),
                 }
             )
-        return
+        return results
     except BaseException as exc:
         for idx, test_case in enumerate(public_tests):
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -71,7 +69,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                     "time_elapsed": 0.0,
                 }
             )
-        return
+        return results
 
     for idx, test_case in enumerate(public_tests):
         start = time.time()
@@ -79,7 +77,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
             with swallow_io():
                 with time_limit(timeout):
                     exec(test_case, namespace)
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -90,7 +88,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                 }
             )
         except TimeoutException:
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -101,7 +99,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                 }
             )
         except AssertionError as exc:
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -112,7 +110,7 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                 }
             )
         except BaseException as exc:
-            result_list.append(
+            results.append(
                 {
                     "test_index": idx,
                     "test_case": test_case,
@@ -122,24 +120,65 @@ def _run_public_feedback_worker(generation: str, public_tests: List[str], timeou
                     "time_elapsed": time.time() - start,
                 }
             )
+    return results
 
 
-def _run_private_feedback_worker(
+def _split_private_feedback_test(test: str):
+    test = normalize_mbpp_test(test)
+    match = re.search(r"\nfor i,\s*(?:\(inp,\s*exp\)|inp)\s+in\s+enumerate\(.*?\):\n(?P<body>.*)$", test, re.DOTALL)
+    if not match:
+        return None, None, None
+
+    setup_code = test[: match.start()]
+    assertion_line = None
+    for line in match.group("body").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("assertion("):
+            assertion_line = stripped
+            break
+    if assertion_line is None:
+        return None, None, None
+
+    call = ast.parse(assertion_line).body[0].value
+    if not isinstance(call, ast.Call) or len(call.args) < 2:
+        return None, None, None
+
+    return setup_code, ast.unparse(call.args[0]), ast.unparse(call.args[1])
+
+
+def _evaluate_private_feedback(
     generation: str,
-    setup_code: str,
-    actual_expr: str,
-    expected_expr: str,
+    example: Dict[str, Any],
     timeout: float,
-    result_list,
-):
-    reliability_guard()
+) -> List[Dict[str, Any]]:
+    test = example.get("test")
+    if isinstance(test, list):
+        test = "\n".join(test)
+    if not isinstance(test, str):
+        return []
+
+    setup_code, actual_expr, expected_expr = _split_private_feedback_test(test)
+    if setup_code is None:
+        return [
+            {
+                "test_index": 0,
+                "test_case": None,
+                "passed": False,
+                "details": "Private test feedback is unavailable for this test format.",
+                "output": None,
+                "expected": None,
+                "time_elapsed": 0.0,
+            }
+        ]
+
+    results_out = []
     namespace = {}
     try:
         with swallow_io():
             with time_limit(timeout):
                 exec(generation + "\n" + setup_code, namespace)
     except TimeoutException:
-        result_list.append(
+        results_out.append(
             {
                 "test_index": 0,
                 "test_case": None,
@@ -150,9 +189,9 @@ def _run_private_feedback_worker(
                 "time_elapsed": float("inf"),
             }
         )
-        return
+        return results_out
     except BaseException as exc:
-        result_list.append(
+        results_out.append(
             {
                 "test_index": 0,
                 "test_case": None,
@@ -163,7 +202,7 @@ def _run_private_feedback_worker(
                 "time_elapsed": 0.0,
             }
         )
-        return
+        return results_out
 
     inputs = namespace.get("inputs", [])
     results = namespace.get("results")
@@ -184,53 +223,144 @@ def _run_private_feedback_worker(
                     expected = eval(expected_expr, local_namespace)
                     output = eval(actual_expr, local_namespace)
                     assertion(output, expected, 0)
-            result_list.append(
+            results_out.append(
                 {
                     "test_index": idx,
-                    "test_case": {"input": inp},
+                    "test_case": {"input": _safe_repr(inp)},
                     "passed": True,
                     "details": f"Private test passed with output {_safe_repr(output)}.",
-                    "output": output,
-                    "expected": expected,
+                    "output": _safe_repr(output),
+                    "expected": _safe_repr(expected),
                     "time_elapsed": time.time() - start,
                 }
             )
         except TimeoutException:
-            result_list.append(
+            results_out.append(
                 {
                     "test_index": idx,
-                    "test_case": {"input": inp},
+                    "test_case": {"input": _safe_repr(inp)},
                     "passed": False,
                     "details": "Private test timed out.",
-                    "output": output,
-                    "expected": expected,
+                    "output": _safe_repr(output),
+                    "expected": _safe_repr(expected),
                     "time_elapsed": float("inf"),
                 }
             )
         except AssertionError as exc:
-            result_list.append(
+            results_out.append(
                 {
                     "test_index": idx,
-                    "test_case": {"input": inp},
+                    "test_case": {"input": _safe_repr(inp)},
                     "passed": False,
                     "details": str(exc) or f"Expected {_safe_repr(expected)}, but got {_safe_repr(output)}.",
-                    "output": output,
-                    "expected": expected,
+                    "output": _safe_repr(output),
+                    "expected": _safe_repr(expected),
                     "time_elapsed": time.time() - start,
                 }
             )
         except BaseException as exc:
-            result_list.append(
+            results_out.append(
                 {
                     "test_index": idx,
-                    "test_case": {"input": inp},
+                    "test_case": {"input": _safe_repr(inp)},
                     "passed": False,
                     "details": f"Private test failed with error: {exc}",
-                    "output": output,
-                    "expected": expected,
+                    "output": _safe_repr(output),
+                    "expected": _safe_repr(expected),
                     "time_elapsed": time.time() - start,
                 }
             )
+    return results_out
+
+
+def _timeout_feedback(details: str) -> Dict[str, Any]:
+    return {
+        "test_index": 0,
+        "test_case": None,
+        "passed": False,
+        "details": details,
+        "output": None,
+        "expected": None,
+        "time_elapsed": float("inf"),
+    }
+
+
+def _feedback_payload(public_results, private_results):
+    private_passed = bool(private_results) and all(result.get("passed") for result in private_results)
+    return {
+        "public_test_results": public_results,
+        "private_test_results": private_results,
+        "result": {"pass@1": 1.0 if private_passed else 0.0},
+    }
+
+
+def _run_task_feedback_worker(generation: str, example: Dict[str, Any], timeout: float, conn):
+    try:
+        reliability_guard()
+        conn.send(
+            _feedback_payload(
+                _evaluate_public_feedback(generation, example.get("test_list") or [], timeout),
+                _evaluate_private_feedback(generation, example, timeout),
+            )
+        )
+    except BaseException as exc:
+        conn.send(
+            _feedback_payload(
+                [],
+                [
+                    {
+                        "test_index": 0,
+                        "test_case": None,
+                        "passed": False,
+                        "details": f"Evaluator worker failed: {exc}",
+                        "output": None,
+                        "expected": None,
+                        "time_elapsed": 0.0,
+                    }
+                ],
+            )
+        )
+    finally:
+        conn.close()
+
+
+def _run_in_subprocess(target, args, timeout, default):
+    mp_context = _get_mp_context()
+    parent_conn, child_conn = mp_context.Pipe(duplex=False)
+    process = mp_context.Process(target=target, args=(*args, child_conn))
+    process.start()
+    child_conn.close()
+
+    deadline = time.time() + timeout
+    while process.is_alive() and time.time() < deadline:
+        if parent_conn.poll(0.1):
+            return _finish_process(process, parent_conn, default)
+
+    process.join(0)
+    if process.is_alive():
+        process.kill()
+        process.join()
+    try:
+        if parent_conn.poll():
+            return parent_conn.recv()
+    except (EOFError, OSError):
+        pass
+    finally:
+        parent_conn.close()
+    return default
+
+
+def _finish_process(process, parent_conn, default):
+    try:
+        result = parent_conn.recv()
+    except (EOFError, OSError):
+        result = default
+    process.join(1)
+    if process.is_alive():
+        process.kill()
+        process.join()
+    parent_conn.close()
+    return result
 
 
 class MBPPPlusBenchmark(BaseBenchmark):
@@ -340,12 +470,10 @@ Here is my problem:
 
     def extract_code(self, completion: str) -> str:
         """Extract code block from model completion."""
-        try:
-            code_block = re.findall(r"```python\n(.*?)```", completion, re.DOTALL | re.IGNORECASE)[0]
-            return code_block
-        except Exception as e:
-            self.logger.warning(f"Failed to extract code block, using full completion.\nError: {str(e)}")
-            return completion
+        match = re.search(r"```(?:python)?\s*\n?(.*?)```", completion, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return completion
 
     def generate_responses(self, model: LM) -> Dict[str, Any]:
         """
@@ -469,126 +597,45 @@ Here is my problem:
         return evaluation_results
 
     @staticmethod
-    def _run_feedback_worker(target, args: tuple, timeout: float) -> List[Dict[str, Any]]:
-        mp_context = _get_mp_context()
-        manager = mp_context.Manager()
-        result_list = manager.list()
-        process = mp_context.Process(target=target, args=(*args, result_list))
-        process.start()
-        process.join(timeout + 1)
-        if process.is_alive():
-            process.kill()
-            process.join()
-            result_list.append(
-                {
-                    "test_index": len(result_list),
-                    "test_case": None,
-                    "passed": False,
-                    "details": "Timed out while collecting test feedback.",
-                    "output": None,
-                    "time_elapsed": float("inf"),
-                }
-            )
-        results = list(result_list)
-        manager.shutdown()
-        return results
+    def _run_feedback_worker(example: Dict[str, Any], generation: str, timeout: float) -> Dict[str, Any]:
+        public_tests = example.get("test_list") or []
+        hard_timeout = timeout * max(len(public_tests), 1) + 5
+        timeout_result = _timeout_feedback("Timed out or exited while collecting test feedback.")
+        return _run_in_subprocess(
+            _run_task_feedback_worker,
+            (generation, example, timeout),
+            hard_timeout,
+            _feedback_payload([timeout_result], [timeout_result]),
+        )
 
     def evaluate_public_test_cases(
         self, example: Dict[str, Any], generation: str, timeout: float
     ) -> List[Dict[str, Any]]:
-        public_tests = example.get("test_list") or []
-        if not public_tests:
-            return []
-        return self._run_feedback_worker(
-            _run_public_feedback_worker,
-            (generation, public_tests, timeout),
-            timeout * max(len(public_tests), 1),
-        )
+        return self._run_feedback_worker(example, generation, timeout)["public_test_results"]
 
     @staticmethod
     def _split_private_feedback_test(test: str):
-        test = normalize_mbpp_test(test)
-        match = re.search(r"\nfor i,\s*(?:\(inp,\s*exp\)|inp)\s+in\s+enumerate\(.*?\):\n(?P<body>.*)$", test, re.DOTALL)
-        if not match:
-            return None, None, None
-
-        setup_code = test[: match.start()]
-        assertion_line = None
-        for line in match.group("body").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("assertion("):
-                assertion_line = stripped
-                break
-        if assertion_line is None:
-            return None, None, None
-
-        call = ast.parse(assertion_line).body[0].value
-        if not isinstance(call, ast.Call) or len(call.args) < 2:
-            return None, None, None
-
-        return setup_code, ast.unparse(call.args[0]), ast.unparse(call.args[1])
+        return _split_private_feedback_test(test)
 
     def evaluate_private_test_cases(
         self, example: Dict[str, Any], generation: str, timeout: float
     ) -> List[Dict[str, Any]]:
-        test = example.get("test")
-        if not isinstance(test, str):
-            return []
-
-        setup_code, actual_expr, expected_expr = self._split_private_feedback_test(test)
-        if setup_code is None:
-            return [
-                {
-                    "test_index": 0,
-                    "test_case": None,
-                    "passed": False,
-                    "details": "Private test feedback is unavailable for this test format.",
-                    "output": None,
-                    "expected": None,
-                    "time_elapsed": 0.0,
-                }
-            ]
-
-        return self._run_feedback_worker(
-            _run_private_feedback_worker,
-            (generation, setup_code, actual_expr, expected_expr, timeout),
-            timeout * max(len(example.get("test_list") or []), 1) + 5,
-        )
+        return self._run_feedback_worker(example, generation, timeout)["private_test_results"]
 
     def evaluate_task_instance(self, task_instance: TaskInstance, raw_output: str) -> Dict[str, Any]:
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_file_path = os.path.join(temp_dir, "generated_python.jsonl")
-                generation = self.extract_code(raw_output)
-                sample = {
-                    "task_id": task_instance.doc["task_id"],
-                    "generation": generation,
-                }
-                with open(temp_file_path, "w", encoding="utf-8") as fw:
-                    fw.write(json.dumps(sample) + "\n")
-
-                task_timeout = get_task_timeout(task_instance.doc["task_id"], self.timeout, self.task_timeouts)
-                result = evaluate_functional_correctness(
-                    input_file=temp_file_path,
-                    tmp_dir=temp_dir,
-                    n_workers=self.num_workers,
-                    timeout=self.timeout,
-                    problem_file=os.path.join(self.data_dir, "mbppplus.jsonl"),
-                    language="python",
-                    is_mbpp=True,
-                    k=[1],
-                    task_timeouts=self.task_timeouts,
-                )
-                problem = read_dataset(os.path.join(self.data_dir, "mbppplus.jsonl"))[task_instance.doc["task_id"]]
-                public_test_results = self.evaluate_public_test_cases(problem, generation, task_timeout)
-                private_test_results = self.evaluate_private_test_cases(problem, generation, task_timeout)
+            generation = self.extract_code(raw_output)
+            task_id = task_instance.doc["task_id"]
+            task_timeout = get_task_timeout(task_id, self.timeout, self.task_timeouts)
+            problem = read_dataset(os.path.join(self.data_dir, "mbppplus.jsonl"))[task_id]
+            feedback = self._run_feedback_worker(problem, generation, task_timeout)
 
             return {
                 "supported": True,
                 "raw_output": raw_output,
-                "result": result,
-                "public_test_results": public_test_results,
-                "private_test_results": private_test_results,
+                "result": feedback["result"],
+                "public_test_results": feedback["public_test_results"],
+                "private_test_results": feedback["private_test_results"],
             }
         except Exception as exc:
             return {
