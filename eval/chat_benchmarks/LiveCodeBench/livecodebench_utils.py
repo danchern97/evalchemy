@@ -61,7 +61,8 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
 
     import os
 
-    os.environ["OMP_NUM_THREADS"] = "1"
+    if callable(getattr(os, "putenv", None)):
+        os.environ["OMP_NUM_THREADS"] = "1"
 
     os.kill = None
     os.system = None

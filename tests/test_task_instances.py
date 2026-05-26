@@ -703,6 +703,22 @@ assertion(f(), ((1.0,), 2 + 1e-15j, 10**200, float('inf')), 0)
         self.assertEqual(stdout.getvalue(), "")
         self.assertTrue(result[0][0])
 
+    def test_livecodebench_combined_public_private_correct_solution_passes(self):
+        from eval.chat_benchmarks.LiveCodeBench.livecodebench_utils import lcb_run_test_cases, lcb_run_test_sets
+
+        completion = "def add(a, b):\n    return a + b\n"
+        public_tests = [{"input": "1\n2", "output": "3", "testtype": "functional"}]
+        private_tests = [{"input": "10\n32", "output": "42", "testtype": "functional"}]
+
+        public_only = lcb_run_test_cases(public_tests, completion, timeout=1, is_extracted=True)
+        private_only = lcb_run_test_cases(private_tests, completion, timeout=1, is_extracted=True)
+        combined = lcb_run_test_sets(private_tests, public_tests, completion, timeout=1, is_extracted=True)
+
+        self.assertTrue(all(result[0] for result in public_only))
+        self.assertTrue(all(result[0] for result in private_only))
+        self.assertTrue(all(result[0] for result in combined["public"]))
+        self.assertTrue(all(result[0] for result in combined["private"]))
+
     def test_task_manager_forwards_livecodebench_version(self):
         from eval.task import TaskManager
 
